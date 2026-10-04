@@ -105,12 +105,14 @@ bool SuperHFrameLowering::assignCalleeSavedSpillSlots(
     return getPushRank(A.getReg()) < getPushRank(B.getReg());
   });
   MachineFrameInfo &MFI = MF.getFrameInfo();
-  int64_t Offset = 0;
+  auto *FuncInfo = MF.getInfo<SuperHMachineFunctionInfo>();
+  int64_t Start = -int64_t(FuncInfo->getVarArgsSaveSize());
+  int64_t Offset = Start;
   for (CalleeSavedInfo &Info : CSI) {
     Offset -= 4;
     Info.setFrameIdx(MFI.CreateFixedSpillStackObject(4, Offset));
   }
-  MF.getInfo<SuperHMachineFunctionInfo>()->setCalleeSavedSize(-Offset);
+  FuncInfo->setCalleeSavedSize(Start - Offset);
   return true;
 }
 
@@ -132,7 +134,8 @@ bool SuperHFrameLowering::spillCalleeSavedRegisters(
   const SuperHInstrInfo &TII = *STI.getInstrInfo();
   DebugLoc DL = MBB.findDebugLoc(MI);
   const MCRegisterInfo *MRI = MBB.getParent()->getContext().getRegisterInfo();
-  int64_t Offset = 0;
+  int64_t Offset =
+      MBB.getParent()->getInfo<SuperHMachineFunctionInfo>()->getVarArgsSaveSize();
   for (const CalleeSavedInfo &Info : CSI) {
     MCRegister Reg = Info.getReg();
     if (!MBB.isLiveIn(Reg))
@@ -185,17 +188,30 @@ SuperHFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
 }
 
 static int64_t getLocalSize(const MachineFunction &MF) {
-  return MF.getFrameInfo().getStackSize() -
-         MF.getInfo<SuperHMachineFunctionInfo>()->getCalleeSavedSize();
+  auto *FuncInfo = MF.getInfo<SuperHMachineFunctionInfo>();
+  return MF.getFrameInfo().getStackSize() - FuncInfo->getCalleeSavedSize() -
+         FuncInfo->getVarArgsSaveSize();
 }
 
 void SuperHFrameLowering::emitPrologue(MachineFunction &MF,
                                        MachineBasicBlock &MBB) const {
   const SuperHInstrInfo &TII = *STI.getInstrInfo();
   MachineBasicBlock::iterator MBBI = MBB.begin();
+  DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
+
+  // Room for the unnamed argument registers goes above the pushed registers.
+  if (int64_t SaveSize =
+          MF.getInfo<SuperHMachineFunctionInfo>()->getVarArgsSaveSize()) {
+    TII.adjustRegister(MBB, MBBI, DL, SH::R15, -SaveSize, SH::R1,
+                       MachineInstr::FrameSetup);
+    emitCFI(MBB, MBBI, DL,
+            MCCFIInstruction::cfiDefCfaOffset(nullptr, SaveSize));
+  }
+
   while (MBBI != MBB.end() && MBBI->getFlag(MachineInstr::FrameSetup))
     ++MBBI;
-  DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
+  if (MBBI != MBB.end())
+    DL = MBBI->getDebugLoc();
 
   // R1 holds nothing on entry under either convention.
   int64_t LocalSize = getLocalSize(MF);
@@ -243,4 +259,9 @@ void SuperHFrameLowering::emitEpilogue(MachineFunction &MF,
         .setMIFlag(MachineInstr::FrameDestroy);
   TII.adjustRegister(MBB, MBBI, DL, SH::R15, getLocalSize(MF), Scratch,
                      MachineInstr::FrameDestroy);
+
+  if (int64_t SaveSize =
+          MF.getInfo<SuperHMachineFunctionInfo>()->getVarArgsSaveSize())
+    TII.adjustRegister(MBB, Terminator, DL, SH::R15, SaveSize, Scratch,
+                       MachineInstr::FrameDestroy);
 }

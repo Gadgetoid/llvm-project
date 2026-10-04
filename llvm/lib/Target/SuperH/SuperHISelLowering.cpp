@@ -300,10 +300,33 @@ SDValue SuperHTargetLowering::LowerFormalArguments(
     InVals.push_back(truncateArgument(Value, VA, DL, DAG));
   }
 
-  if (IsVarArg) {
-    if (!WinCE)
-      report_fatal_error("SuperH: variadic functions need the Windows CE "
-                         "calling convention");
+  if (IsVarArg && !WinCE) {
+    // GCC's convention: the callee stores the argument registers that hold
+    // no named argument just below the incoming stack arguments, so that the
+    // unnamed arguments are contiguous in memory.
+    unsigned FirstFree = CCInfo.getFirstUnallocated(ArgumentRegisters);
+    unsigned SaveSize = (std::size(ArgumentRegisters) - FirstFree) * 4;
+    FuncInfo->setVarArgsSaveSize(SaveSize);
+    if (SaveSize == 0) {
+      FuncInfo->setVarArgsFrameIndex(MFI.CreateFixedObject(
+          4, CCInfo.getStackSize(), /*IsImmutable=*/true));
+    } else {
+      int FI = MFI.CreateFixedObject(SaveSize, -int64_t(SaveSize),
+                                     /*IsImmutable=*/false);
+      FuncInfo->setVarArgsFrameIndex(FI);
+      SDValue Base = DAG.getFrameIndex(FI, MVT::i32);
+      for (unsigned I = FirstFree; I < std::size(ArgumentRegisters); ++I) {
+        unsigned Within = (I - FirstFree) * 4;
+        Register VReg = MF.addLiveIn(ArgumentRegisters[I], &SH::GPRRegClass);
+        SDValue Value = DAG.getCopyFromReg(Chain, DL, VReg, MVT::i32);
+        SDValue Address = DAG.getNode(ISD::ADD, DL, MVT::i32, Base,
+                                      DAG.getConstant(Within, DL, MVT::i32));
+        Stores.push_back(
+            DAG.getStore(Chain, DL, Value, Address,
+                         MachinePointerInfo::getFixedStack(MF, FI, Within)));
+      }
+    }
+  } else if (IsVarArg) {
     // The calling standard stores all four argument registers to the home
     // area, so that the whole argument list can be walked in memory.
     unsigned FirstVariadic = CCInfo.getStackSize();

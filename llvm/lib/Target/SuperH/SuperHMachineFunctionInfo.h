@@ -28,6 +28,10 @@ class SuperHMachineFunctionInfo : public MachineFunctionInfo {
   /// Bytes of callee-saved registers pushed by the prologue.
   unsigned CalleeSavedSize = 0;
 
+  /// Bytes reserved above the callee-saved registers for the unnamed argument
+  /// registers of a GNU convention variadic function.
+  unsigned VarArgsSaveSize = 0;
+
   /// Counter for literal pool labels.
   unsigned NextLiteralLabel = 0;
 
@@ -48,6 +52,9 @@ public:
 
   unsigned getCalleeSavedSize() const { return CalleeSavedSize; }
   void setCalleeSavedSize(unsigned Size) { CalleeSavedSize = Size; }
+
+  unsigned getVarArgsSaveSize() const { return VarArgsSaveSize; }
+  void setVarArgsSaveSize(unsigned Size) { VarArgsSaveSize = Size; }
 
   unsigned createLiteralLabel() { return NextLiteralLabel++; }
 };

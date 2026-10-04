@@ -74,6 +74,16 @@ public:
     for (auto &I : FI.arguments())
       I.info = classifyArgumentType(I.type, NumRegs);
   }
+
+  // The callee stores the unnamed argument registers next to the stack
+  // arguments, so va_list is a pointer that walks 4-byte words.
+  RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
+                   AggValueSlot Slot) const override {
+    return emitVoidPtrVAArg(CGF, VAListAddr, Ty, /*IsIndirect=*/false,
+                            getContext().getTypeInfoInChars(Ty),
+                            CharUnits::fromQuantity(4),
+                            /*AllowHigherAlign=*/false, Slot);
+  }
 };
 
 //===----------------------------------------------------------------------===//
