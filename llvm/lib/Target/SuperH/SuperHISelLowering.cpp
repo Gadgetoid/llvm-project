@@ -117,6 +117,8 @@ SuperHTargetLowering::SuperHTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::FRAMEADDR, MVT::i32, Custom);
   setOperationAction(ISD::RETURNADDR, MVT::i32, Custom);
 
+  // Windows CE devices have a single core: a fence only orders the compiler.
+  setOperationAction(ISD::ATOMIC_FENCE, MVT::Other, Custom);
   setOperationAction(ISD::TRAP, MVT::Other, Legal);
   setOperationAction(ISD::DEBUGTRAP, MVT::Other, Legal);
 }
@@ -778,6 +780,8 @@ SDValue SuperHTargetLowering::LowerOperation(SDValue Op,
   case ISD::UADDO_CARRY:
   case ISD::USUBO_CARRY:
     return lowerCarryOp(Op, DAG);
+  case ISD::ATOMIC_FENCE:
+    return Op.getOperand(0);
   case ISD::ROTL:
   case ISD::ROTR: {
     // rotl and rotr by one, and rotations by 16, have instructions.
@@ -900,6 +904,9 @@ SuperHTargetLowering::emitSelect(MachineInstr &MI,
   MachineBasicBlock *SinkMBB = MF->CreateMachineBasicBlock(LLVMBB);
   MF->insert(Insert, FalseMBB);
   MF->insert(Insert, SinkMBB);
+  unsigned CallFrameSize = TII.getCallFrameSizeAt(MI);
+  FalseMBB->setCallFrameSize(CallFrameSize);
+  SinkMBB->setCallFrameSize(CallFrameSize);
   if (isTLiveAfter(MI, MBB)) {
     FalseMBB->addLiveIn(SH::SR);
     SinkMBB->addLiveIn(SH::SR);

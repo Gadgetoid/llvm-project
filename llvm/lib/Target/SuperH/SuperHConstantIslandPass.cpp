@@ -285,6 +285,12 @@ SuperHConstantIslands::splitWithJumpAround(MachineInstr &After) {
   DebugLoc DL = After.getDebugLoc();
   MachineBasicBlock *Rest;
   MachineBasicBlock::iterator Next = std::next(MachineBasicBlock::iterator(After));
+  if (Next == MBB.end() && std::next(MBB.getIterator()) == MF->end()) {
+    // Nothing follows the end of the function, such as a noreturn call.
+    MachineBasicBlock *Pool = MF->CreateMachineBasicBlock();
+    MF->push_back(Pool);
+    return Pool;
+  }
   if (Next == MBB.end()) {
     Rest = &*std::next(MBB.getIterator());
   } else {

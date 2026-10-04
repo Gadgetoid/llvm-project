@@ -52,6 +52,11 @@ public:
     return getTM<SuperHTargetMachine>();
   }
 
+  void addIRPasses() override {
+    addPass(createAtomicExpandLegacyPass());
+    TargetPassConfig::addIRPasses();
+  }
+
   bool addInstSelector() override {
     addPass(createSuperHISelDag(getSuperHTargetMachine(), getOptLevel()));
     return false;
