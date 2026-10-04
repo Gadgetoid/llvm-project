@@ -14,6 +14,7 @@
 //   incoming stack arguments          sp_entry + 16 ...  (sp_entry + 0 GNU)
 //   home area for R4-R7 (Windows CE)  sp_entry + 0 .. 15
 //   ------------------------------------------------ sp_entry
+//   unnamed argument registers of a GNU variadic function
 //   register save area: R14, R8-R13, PR, pushed in that order
 //   locals and spill slots
 //   outgoing argument area            sp + 0 ...

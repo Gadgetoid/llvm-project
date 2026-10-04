@@ -15,8 +15,13 @@ using namespace clang;
 using namespace clang::CodeGen;
 
 //===----------------------------------------------------------------------===//
-// SuperH ABI Implementation. Documented at
-// https://llvm-gcc-renesas.com/manuals/SH-ABI-Specification.html
+// SuperH GNU ABI Implementation, as GCC implements it without -mrenesas.
+//
+// Arguments are a sequence of 4-byte words, the first four in R4-R7 and the
+// rest on the stack; an argument may be split between the two. Structures are
+// copied into the sequence. A structure is returned in R0 (and R1) when GCC
+// gives it an integer mode, and otherwise in memory at an address passed in
+// R2.
 //===----------------------------------------------------------------------===//
 
 namespace {
@@ -24,55 +29,47 @@ class SuperHABIInfo : public DefaultABIInfo {
 public:
   SuperHABIInfo(CodeGenTypes &CGT) : DefaultABIInfo(CGT) {}
 
-  ABIArgInfo classifyReturnType(QualType Ty, bool &LargeRet) const {
-
-    // We have a total of 64 bits of return space in R0 and R1,
-    // if we can fit a struct in there, do.
-    if (isAggregateTypeForABI(Ty) && getContext().getTypeSize(Ty) <= 64)
-      return ABIArgInfo::getDirect();
-
-    // Otherwise, we store a pointer to the struct in R2 and return that.
-    if (getContext().getTypeSize(Ty) > 64) {
-      LargeRet = true;
-      return getNaturalAlignIndirect(Ty, getDataLayout().getAllocaAddrSpace());
+  // GCC gives a structure an integer mode when its size is 1, 2, 4 or 8 bytes
+  // and it is at least as aligned as that mode, whose alignment is at most
+  // 4 bytes.
+  ABIArgInfo classifyReturnType(QualType Ty) const {
+    if (Ty->isVoidType())
+      return ABIArgInfo::getIgnore();
+    if (!isAggregateTypeForABI(Ty))
+      return DefaultABIInfo::classifyReturnType(Ty);
+    if (getRecordArgABI(Ty, getCXXABI()) == CGCXXABI::RAA_Default) {
+      if (isEmptyRecord(getContext(), Ty, true))
+        return ABIArgInfo::getIgnore();
+      uint64_t Size = getContext().getTypeSize(Ty);
+      uint64_t Align = getContext().getTypeAlign(Ty);
+      if ((Size == 8 || Size == 16 || Size == 32 || Size == 64) &&
+          Align >= std::min<uint64_t>(Size, 32))
+        return ABIArgInfo::getDirect(
+            llvm::IntegerType::get(getVMContext(), Size));
     }
-
-    // Otherwise we follow the default way which is compatible.
-    return DefaultABIInfo::classifyReturnType(Ty);
+    return getNaturalAlignIndirect(Ty, getDataLayout().getAllocaAddrSpace());
   }
 
-  ABIArgInfo classifyArgumentType(QualType Ty, unsigned &NumRegs) const {
-    unsigned TySize = getContext().getTypeSize(Ty);
-
-    // Smaller types are required to be sign extended.
-    if (TySize < 32 && NumRegs > 0 && Ty->isIntegralOrEnumerationType()) {
-      NumRegs -= 1;
-      return ABIArgInfo::getExtend(Ty);
-    }
-
-    // If there's enough space, pass in registers.
-    if (TySize <= NumRegs * 32) {
-      NumRegs -= TySize / 32;
-      return ABIArgInfo::getDirect();
-    }
-
-    // A pointer will be created and passsed in R4 instead, as the arguments
-    // from here on out doesn't fit in the remaining registers.
-    NumRegs = 0;
-    return ABIArgInfo::getDirect();
+  ABIArgInfo classifyArgumentType(QualType Ty) const {
+    if (!isAggregateTypeForABI(Ty))
+      return DefaultABIInfo::classifyArgumentType(Ty);
+    if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+      return getNaturalAlignIndirect(Ty, getDataLayout().getAllocaAddrSpace(),
+                                     RAA == CGCXXABI::RAA_DirectInMemory);
+    if (isEmptyRecord(getContext(), Ty, true))
+      return ABIArgInfo::getIgnore();
+    llvm::Type *Word = llvm::IntegerType::get(getVMContext(), 32);
+    uint64_t Words = llvm::alignTo(getContext().getTypeSize(Ty), 32) / 32;
+    if (Words == 1)
+      return ABIArgInfo::getDirect(Word);
+    return ABIArgInfo::getDirect(llvm::ArrayType::get(Word, Words));
   }
 
   void computeInfo(CGFunctionInfo &FI) const override {
-
-    // Decide the return type.
-    bool LargeRet = false;
     if (!getCXXABI().classifyReturnType(FI))
-      FI.getReturnInfo() = classifyReturnType(FI.getReturnType(), LargeRet);
-
-    // Decide each argument type.
-    unsigned NumRegs = 4;
-    for (auto &I : FI.arguments())
-      I.info = classifyArgumentType(I.type, NumRegs);
+      FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+    for (auto &Arg : FI.arguments())
+      Arg.info = classifyArgumentType(Arg.type);
   }
 
   // The callee stores the unnamed argument registers next to the stack

@@ -175,6 +175,13 @@ bool llvm::CC_SuperH_WinCE(unsigned ValNo, MVT ValVT, MVT LocVT,
 bool llvm::CC_SuperH(unsigned ValNo, MVT ValVT, MVT LocVT,
                      CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
                      Type *OrigTy, CCState &State) {
+  // GCC passes the address for a structure return value in R2, apart from
+  // the argument words.
+  if (ArgFlags.isSRet()) {
+    State.addLoc(CCValAssign::getReg(ValNo, ValVT, SH::R2, LocVT, LocInfo));
+    return false;
+  }
+
   if (ArgFlags.isByVal()) {
     unsigned Size = alignTo(ArgFlags.getByValSize(), 4);
     unsigned Offset = State.AllocateStack(Size, Align(4));
