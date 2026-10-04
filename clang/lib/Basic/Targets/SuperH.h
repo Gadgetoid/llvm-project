@@ -26,37 +26,36 @@ class LLVM_LIBRARY_VISIBILITY SuperHTargetInfo : public TargetInfo {
 public:
   SuperHTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
+    bool WinCE = Triple.isWinCE();
     TLSSupported = false;
-    PointerWidth = 32;
-    PointerAlign = 32;
-    ShortWidth = 16;
-    ShortAlign = 32;
-    IntWidth = 32;
-    IntAlign = 32;
-    LongWidth = 32;
-    LongAlign = 32;
+    PointerWidth = PointerAlign = 32;
+    ShortWidth = ShortAlign = 16;
+    IntWidth = IntAlign = 32;
+    LongWidth = LongAlign = 32;
     LongLongWidth = 64;
-    LongLongAlign = 64;
-    SuitableAlign = 32;
-    DefaultAlignForAttributeAligned = 32;
-    HalfWidth = 16;
-    HalfAlign = 32;
-    FloatWidth = 32;
-    FloatAlign = 32;
-    DoubleWidth = 32;
-    DoubleAlign = 32;
-    DoubleFormat = &llvm::APFloat::IEEEsingle();
+    HalfWidth = HalfAlign = 16;
+    FloatWidth = FloatAlign = 32;
+    DoubleWidth = 64;
     LongDoubleWidth = 64;
-    LongDoubleAlign = 64;
+    DoubleFormat = &llvm::APFloat::IEEEdouble();
     LongDoubleFormat = &llvm::APFloat::IEEEdouble();
+    // Microsoft's SH compilers align 64-bit types naturally, GCC to 4 bytes.
+    LongLongAlign = DoubleAlign = LongDoubleAlign = WinCE ? 64 : 32;
+    SuitableAlign = WinCE ? 64 : 32;
+    DefaultAlignForAttributeAligned = WinCE ? 64 : 32;
     SizeType = UnsignedInt;
     PtrDiffType = SignedInt;
     IntPtrType = SignedInt;
     Char16Type = UnsignedShort;
-    WIntType = SignedInt;
+    Char32Type = UnsignedInt;
     Int16Type = SignedShort;
-    Char32Type = UnsignedLong;
-    SigAtomicType = SignedChar;
+    SigAtomicType = SignedInt;
+    if (WinCE) {
+      WCharType = UnsignedShort;
+      WIntType = UnsignedShort;
+    } else {
+      WIntType = SignedInt;
+    }
     resetDataLayout();
   }
 
@@ -83,12 +82,20 @@ public:
   }
 
   ArrayRef<TargetInfo::GCCRegAlias> getGCCRegAliases() const override {
-    return {};
+    static const TargetInfo::GCCRegAlias Aliases[] = {{{"sp"}, "r15"}};
+    return llvm::ArrayRef(Aliases);
   }
 
   bool validateAsmConstraint(const char *&Name,
                              TargetInfo::ConstraintInfo &Info) const override {
-    return false;
+    switch (*Name) {
+    case 'r':
+    case 'z':
+      Info.setAllowsRegister();
+      return true;
+    default:
+      return false;
+    }
   }
 
   bool isValidCPUName(StringRef Name) const override;

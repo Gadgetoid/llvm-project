@@ -57,7 +57,44 @@ SuperHTargetInfo::handleAsmEscapedChar(char EscChar) const {
 
 void SuperHTargetInfo::getTargetDefines(const LangOptions &Opts,
                                         MacroBuilder &Builder) const {
-  Builder.defineMacro("SH");
   Builder.defineMacro("__SH");
   Builder.defineMacro("__SH__");
+  Builder.defineMacro("__sh__");
+  if (getTriple().isLittleEndian())
+    Builder.defineMacro("__LITTLE_ENDIAN__");
+  else
+    Builder.defineMacro("__BIG_ENDIAN__");
+
+  StringRef Name = CPU;
+  if (Name.empty()) {
+    switch (getTriple().getSubArch()) {
+    case llvm::Triple::SuperHSubArch_1:
+      Name = "sh1";
+      break;
+    case llvm::Triple::SuperHSubArch_2:
+      Name = "sh2";
+      break;
+    case llvm::Triple::SuperHSubArch_2a:
+      Name = "sh2a";
+      break;
+    case llvm::Triple::SuperHSubArch_2e:
+      Name = "sh2e";
+      break;
+    case llvm::Triple::SuperHSubArch_3:
+      Name = "sh3";
+      break;
+    case llvm::Triple::SuperHSubArch_3e:
+      Name = "sh3e";
+      break;
+    case llvm::Triple::SuperHSubArch_4:
+      Name = "sh4";
+      break;
+    default:
+      Name = "sh4a";
+      break;
+    }
+  }
+  Builder.defineMacro("__" + Name.upper() + "__");
+  if (getTriple().isWinCE())
+    Builder.defineMacro("__SH_WINCE__");
 }

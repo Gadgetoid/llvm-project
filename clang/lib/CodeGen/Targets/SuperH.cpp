@@ -76,14 +76,84 @@ public:
   }
 };
 
+//===----------------------------------------------------------------------===//
+// Windows CE SH-3 ABI Implementation. Documented in Microsoft's "SH-3 Calling
+// Standard" rev 1.4 (Windows CE Toolkit for Visual C++ 5.0).
+//
+// The argument list is laid out like a structure of 4-byte aligned words whose
+// first four words are passed in R4-R7; structures are copied into it. Values
+// of up to 4 bytes are returned in R0 and anything larger, including 64-bit
+// scalars, through a hidden pointer passed in R4.
+//===----------------------------------------------------------------------===//
+
+class SuperHWinCEABIInfo : public DefaultABIInfo {
+public:
+  SuperHWinCEABIInfo(CodeGenTypes &CGT) : DefaultABIInfo(CGT) {}
+
+  ABIArgInfo classifyReturnType(QualType Ty) const {
+    if (Ty->isVoidType())
+      return ABIArgInfo::getIgnore();
+    uint64_t Size = getContext().getTypeSize(Ty);
+    if (Size > 32 || (isAggregateTypeForABI(Ty) &&
+                      getRecordArgABI(Ty, getCXXABI()) != CGCXXABI::RAA_Default))
+      return getNaturalAlignIndirect(Ty, getDataLayout().getAllocaAddrSpace());
+    if (isAggregateTypeForABI(Ty)) {
+      if (isEmptyRecord(getContext(), Ty, true))
+        return ABIArgInfo::getIgnore();
+      return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(), 32));
+    }
+    return DefaultABIInfo::classifyReturnType(Ty);
+  }
+
+  ABIArgInfo classifyArgumentType(QualType Ty) const {
+    if (isAggregateTypeForABI(Ty)) {
+      if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+        return getNaturalAlignIndirect(Ty,
+                                       getDataLayout().getAllocaAddrSpace(),
+                                       RAA == CGCXXABI::RAA_DirectInMemory);
+      if (isEmptyRecord(getContext(), Ty, true))
+        return ABIArgInfo::getIgnore();
+      if (getContext().getTypeSize(Ty) <= 32)
+        return ABIArgInfo::getDirect(
+            llvm::IntegerType::get(getVMContext(), 32));
+      // The copy in the argument list is only 4-byte aligned.
+      return ABIArgInfo::getIndirect(
+          CharUnits::fromQuantity(4), getDataLayout().getAllocaAddrSpace(),
+          /*ByVal=*/true,
+          /*Realign=*/getContext().getTypeAlign(Ty) > 32);
+    }
+    return DefaultABIInfo::classifyArgumentType(Ty);
+  }
+
+  void computeInfo(CGFunctionInfo &FI) const override {
+    if (!getCXXABI().classifyReturnType(FI))
+      FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+    for (auto &Arg : FI.arguments())
+      Arg.info = classifyArgumentType(Arg.type);
+  }
+
+  RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
+                   AggValueSlot Slot) const override {
+    return emitVoidPtrVAArg(CGF, VAListAddr, Ty, /*IsIndirect=*/false,
+                            getContext().getTypeInfoInChars(Ty),
+                            CharUnits::fromQuantity(4),
+                            /*AllowHigherAlign=*/false, Slot);
+  }
+};
+
 class SuperHTargetCodeGenInfo : public TargetCodeGenInfo {
 public:
-  SuperHTargetCodeGenInfo(CodeGenTypes &CGT)
-      : TargetCodeGenInfo(std::make_unique<SuperHABIInfo>(CGT)) {}
+  SuperHTargetCodeGenInfo(CodeGenTypes &CGT, bool WinCE)
+      : TargetCodeGenInfo(
+            WinCE ? std::unique_ptr<ABIInfo>(
+                        std::make_unique<SuperHWinCEABIInfo>(CGT))
+                  : std::unique_ptr<ABIInfo>(
+                        std::make_unique<SuperHABIInfo>(CGT))) {}
 };
 } // namespace
 
 std::unique_ptr<TargetCodeGenInfo>
 CodeGen::createSuperHTargetCodeGenInfo(CodeGenModule &CGM) {
-  return std::make_unique<SuperHTargetCodeGenInfo>(CGM.getTypes());
+  return std::make_unique<SuperHTargetCodeGenInfo>(
+      CGM.getTypes(), CGM.getTriple().isWinCE());
 }
