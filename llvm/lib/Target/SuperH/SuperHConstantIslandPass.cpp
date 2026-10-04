@@ -332,11 +332,31 @@ MachineBasicBlock *SuperHConstantIslands::createPool(MachineInstr &FirstUser,
                                                      unsigned Deadline) {
   unsigned UserOffset = getOffset(FirstUser);
 
+  // The pool also takes a literal for each later user ahead of it that has
+  // none in range. Those users' deadlines are no earlier than the first
+  // user's, so the pool holds them all if it starts early enough for as many
+  // literals as there are values.
+  SmallVector<const MachineOperand *, 16> Values;
+  auto countUser = [&](MachineInstr &MI) {
+    if (MI.getOpcode() != SH::LOADCONST || getOffset(MI) < UserOffset)
+      return;
+    auto It = Assigned.find(&MI);
+    if (&MI != &FirstUser && It != Assigned.end() &&
+        isLiteralInRange(MI, *It->second))
+      return;
+    if (none_of(Values, [&](const MachineOperand *Value) {
+          return sameValue(*Value, MI.getOperand(1));
+        }))
+      Values.push_back(&MI.getOperand(1));
+  };
+
   // Prefer the last block, at or after the user, that ends in a barrier and
-  // leaves room for the literal after any pools already behind it.
+  // leaves room for the literals after any pools already behind it.
   MachineFunction::iterator Where = MF->end();
   bool Found = false;
   for (MachineBasicBlock &MBB : *MF) {
+    for (MachineInstr &MI : MBB)
+      countUser(MI);
     unsigned End = BlockEnds[MBB.getNumber()];
     if (End <= UserOffset || MBB.empty() || Pools.count(&MBB) ||
         !isBarrierBundle(MBB.back()))
@@ -346,7 +366,7 @@ MachineBasicBlock *SuperHConstantIslands::createPool(MachineInstr &FirstUser,
       End = BlockEnds[After->getNumber()];
       ++After;
     }
-    if (alignTo(End, 4) + 4 > Deadline)
+    if (alignTo(End, 4) + 4 * Values.size() > Deadline)
       break;
     Where = After;
     Found = true;
@@ -358,14 +378,16 @@ MachineBasicBlock *SuperHConstantIslands::createPool(MachineInstr &FirstUser,
   }
 
   // Otherwise split the code at the last point that leaves room for the
-  // branch around the pool, its alignment and the literal.
+  // branch around the pool, its alignment and the literals.
+  Values.clear();
   MachineInstr *SplitAfter = &FirstUser;
   for (MachineBasicBlock &MBB : *MF) {
     for (MachineInstr &MI : MBB) {
+      countUser(MI);
       unsigned End = getEnd(MI);
       if (End <= UserOffset)
         continue;
-      if (End + 4 + 2 + 4 > Deadline)
+      if (End + 4 + 2 + 4 * Values.size() > Deadline)
         break;
       if (MI.isTerminator() &&
           std::next(MachineBasicBlock::iterator(MI)) != MBB.end())
