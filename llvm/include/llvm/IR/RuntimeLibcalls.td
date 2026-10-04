@@ -85,8 +85,6 @@ def IsSPARC : LibcallPredicate<[{TT.isSPARC()}]>;
 def IsSPARC32 : LibcallPredicate<[{TT.isSPARC32()}]>;
 def IsSPARC64 : LibcallPredicate<[{TT.isSPARC64()}]>;
 def IsSuperH : LibcallPredicate<[{TT.isSuperH()}]>;
-def IsWinCE : LibcallPredicate<[{TT.isWinCE()}]>;
-def IsNotWinCE : LibcallPredicate<[{!TT.isWinCE()}]>;
 def IsSPIRV : LibcallPredicate<[{TT.isSPIRV()}]>;
 
 def IsX86_32 : LibcallPredicate<[{TT.getArch() == Triple::x86}]>;
@@ -3398,32 +3396,12 @@ def SPARCSystemLibrary
 // SuperH Runtime Libcalls
 //===----------------------------------------------------------------------===//
 
-defset list<RuntimeLibcallImpl> SuperHRuntimeLibcalls = {
-def __sh_divqi3 : RuntimeLibcallImpl<SDIV_I8>;
-def __sh_divhi3 : RuntimeLibcallImpl<SDIV_I16>;
-def __sh_divsi3 : RuntimeLibcallImpl<SDIV_I32>;
-def __sh_udivqi3 : RuntimeLibcallImpl<UDIV_I8>;
-def __sh_udivhi3 : RuntimeLibcallImpl<UDIV_I16>;
-def __sh_udivsi3 : RuntimeLibcallImpl<UDIV_I32>;
-}
-
-defvar SuperH_DivCalls = [
-  __divqi3, __divhi3, __divsi3, __udivqi3, __udivhi3, __udivsi3
-];
-
 def isSuperH : RuntimeLibcallAvailability<(all_of IsSuperH)>;
-def isSuperHWinCE : RuntimeLibcallAvailability<(all_of IsWinCE)>;
-def isSuperHNotWinCE : RuntimeLibcallAvailability<(all_of IsNotWinCE)>;
 
-// Windows CE code links against compiler-rt's generic builtins, so it uses
+// Both conventions link against compiler-rt's generic builtins, so they use
 // the standard names.
 def SuperHSystemLibrary
-      : SystemRuntimeLibrary<isSuperH,
-                            (add (sub DefaultLibcallImpls32, SuperH_DivCalls),
-                            LibcallImpls<(add SuperH_DivCalls), isSuperHWinCE>,
-                            LibcallImpls<(add SuperHRuntimeLibcalls),
-                                         isSuperHNotWinCE>)
->;
+      : SystemRuntimeLibrary<isSuperH, (add DefaultLibcallImpls32)>;
 
 //===----------------------------------------------------------------------===//
 // SPIRV Runtime Libcalls
