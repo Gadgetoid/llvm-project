@@ -171,10 +171,13 @@ public:
 
     bool Pushed = false;
     if (!Scratch || Scratch == Value) {
-      // No free register: borrow one through the stack.
+      // No free register: borrow one through the stack. The push reads the
+      // register when it is live, so that the scavenger, which walks
+      // backwards, still sees the value live above the pop that restores it.
       Scratch = Value == SH::R0 ? SH::R1 : SH::R0;
+      bool Live = RS && RS->isRegUsed(Scratch);
       build(SH::STLP, SH::R15)
-          .addReg(Scratch, RegState::Undef)
+          .addReg(Scratch, getUndefRegState(!Live))
           .addReg(SH::R15);
       Pushed = true;
     }
