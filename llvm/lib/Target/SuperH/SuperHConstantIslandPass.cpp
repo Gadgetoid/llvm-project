@@ -32,6 +32,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineInstrBundle.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/Support/Debug.h"
 
 using namespace llvm;
 
@@ -49,6 +50,9 @@ class SuperHConstantIslands : public MachineFunctionPass {
 
   // The literal each LOADCONST currently loads from.
   DenseMap<MachineInstr *, MachineInstr *> Assigned;
+
+  // Blocks holding literal pools.
+  SmallPtrSet<MachineBasicBlock *, 8> Pools;
 
 public:
   static char ID;
@@ -304,29 +308,27 @@ MachineBasicBlock *SuperHConstantIslands::createPool(MachineInstr &FirstUser,
   unsigned UserOffset = getOffset(FirstUser);
 
   // Prefer the last block, at or after the user, that ends in a barrier and
-  // leaves room for the literal.
-  MachineBasicBlock *Water = nullptr;
+  // leaves room for the literal after any pools already behind it.
+  MachineFunction::iterator Where = MF->end();
+  bool Found = false;
   for (MachineBasicBlock &MBB : *MF) {
     unsigned End = BlockEnds[MBB.getNumber()];
-    if (End <= UserOffset)
+    if (End <= UserOffset || MBB.empty() || Pools.count(&MBB) ||
+        !isBarrierBundle(MBB.back()))
       continue;
+    MachineFunction::iterator After = std::next(MBB.getIterator());
+    while (After != MF->end() && Pools.count(&*After)) {
+      End = BlockEnds[After->getNumber()];
+      ++After;
+    }
     if (alignTo(End, 4) + 4 > Deadline)
       break;
-    if (MBB.empty())
-      continue;
-    MachineInstr &Last = MBB.back();
-    if (isBarrierBundle(Last) && std::next(MBB.getIterator()) != MF->end())
-      Water = &MBB;
+    Where = After;
+    Found = true;
   }
-  if (Water) {
+  if (Found) {
     MachineBasicBlock *Pool = MF->CreateMachineBasicBlock();
-    MF->insert(std::next(Water->getIterator()), Pool);
-    return Pool;
-  }
-  if (!MF->empty() && isBarrierBundle(MF->back().back()) &&
-      alignTo(BlockEnds[MF->back().getNumber()], 4) + 4 <= Deadline) {
-    MachineBasicBlock *Pool = MF->CreateMachineBasicBlock();
-    MF->push_back(Pool);
+    MF->insert(Where, Pool);
     return Pool;
   }
 
@@ -381,10 +383,33 @@ bool SuperHConstantIslands::placeLiterals() {
       continue;
     }
 
+    // Append to a pool that is ahead of the user and in range. Adding to
+    // the end of a pool doesn't move the literals already in it.
+    unsigned UserOffset = getOffset(*User);
+    MachineBasicBlock *Existing = nullptr;
+    for (MachineBasicBlock *Pool : Pools) {
+      unsigned Start = BlockOffsets[Pool->getNumber()];
+      unsigned End = BlockEnds[Pool->getNumber()];
+      if (Start > UserOffset && End <= getDeadline(UserOffset) &&
+          (!Existing || Start > BlockOffsets[Existing->getNumber()]))
+        Existing = Pool;
+    }
+    if (Existing) {
+      MCSymbol *Label = MF->getContext().createTempSymbol("lit", true);
+      Assigned[User] = BuildMI(*Existing, Existing->end(), DebugLoc(),
+                               TII->get(SH::LITERAL))
+                           .addSym(Label)
+                           .add(User->getOperand(1));
+      return true;
+    }
+
     // Start a new pool for this user and the ones after it.
     unsigned Deadline = getDeadline(getOffset(*User));
+    LLVM_DEBUG(dbgs() << "user at " << getOffset(*User) << " deadline "
+                      << Deadline << ": " << *User);
     MachineBasicBlock *Pool = createPool(*User, Deadline);
     Pool->setAlignment(Align(4));
+    Pools.insert(Pool);
     computeOffsets();
     unsigned PoolStart = BlockOffsets[Pool->getNumber()];
     DebugLoc DL;
@@ -466,6 +491,7 @@ bool SuperHConstantIslands::runOnMachineFunction(MachineFunction &Fn) {
   MF = &Fn;
   TII = Fn.getSubtarget<SuperHSubtarget>().getInstrInfo();
   Assigned.clear();
+  Pools.clear();
 
   bool Changed;
   unsigned Iterations = 0;
@@ -474,9 +500,12 @@ bool SuperHConstantIslands::runOnMachineFunction(MachineFunction &Fn) {
       report_fatal_error("SuperH: literal pool placement did not converge");
     computeOffsets();
     Changed = relaxBranches();
-    if (Changed)
+    if (Changed) {
+      LLVM_DEBUG(dbgs() << "relaxed a branch\n");
       continue;
+    }
     Changed = placeLiterals();
+    LLVM_DEBUG(if (Changed) dbgs() << "placed a pool\n");
   } while (Changed);
 
   lower();
