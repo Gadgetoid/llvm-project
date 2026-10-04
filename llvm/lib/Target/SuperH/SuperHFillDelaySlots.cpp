@@ -57,7 +57,8 @@ public:
   }
 
 private:
-  MachineInstr *findCandidate(MachineBasicBlock &MBB, MachineInstr &Branch);
+  MachineInstr *findCandidate(MachineBasicBlock &MBB, MachineInstr &Branch,
+                              SmallVectorImpl<MachineInstr *> &Between);
   bool canMovePast(const MachineInstr &Candidate, const MachineInstr &Other);
   bool conflictsWithBranch(const MachineInstr &Candidate,
                            const MachineInstr &Branch);
@@ -114,12 +115,13 @@ bool SuperHFillDelaySlots::conflictsWithBranch(const MachineInstr &Candidate,
          Candidate.modifiesRegister(SH::PR, TRI);
 }
 
-MachineInstr *SuperHFillDelaySlots::findCandidate(MachineBasicBlock &MBB,
-                                                  MachineInstr &Branch) {
+MachineInstr *
+SuperHFillDelaySlots::findCandidate(MachineBasicBlock &MBB,
+                                    MachineInstr &Branch,
+                                    SmallVectorImpl<MachineInstr *> &Between) {
   if (DisableDelaySlotFiller)
     return nullptr;
   MachineBasicBlock::iterator I = Branch.getIterator();
-  SmallVector<MachineInstr *, 8> Between;
   for (unsigned Count = 0; I != MBB.begin() && Count < DelaySlotSearchLimit;) {
     --I;
     MachineInstr &MI = *I;
@@ -158,10 +160,18 @@ bool SuperHFillDelaySlots::runOnMachineFunction(MachineFunction &MF) {
       if (Branch.isBundledWithSucc())
         continue;
 
-      MachineInstr *Slot = findCandidate(MBB, Branch);
+      SmallVector<MachineInstr *, 8> Between;
+      MachineInstr *Slot = findCandidate(MBB, Branch, Between);
       if (Slot) {
         Slot->removeFromParent();
         MBB.insertAfter(Branch.getIterator(), Slot);
+        // The slot now reads its registers after everything it was moved
+        // past, so none of those is their last use any more.
+        Between.push_back(&Branch);
+        for (const MachineOperand &MO : Slot->operands())
+          if (MO.isReg() && MO.isUse() && MO.getReg())
+            for (MachineInstr *Other : Between)
+              Other->clearRegisterKills(MO.getReg(), TRI);
         // A call's argument registers are read by the callee, after the
         // slot; the call itself no longer sees a value from before it.
         for (MachineOperand &MO : Branch.implicit_operands())

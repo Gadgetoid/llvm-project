@@ -1,0 +1,29 @@
+# RUN: llc -mtriple=sh3el-unknown-none-elf -run-pass=sh-fill-delay-slots -verify-machineinstrs %s -o - | FileCheck %s
+
+# The store moves into the call's delay slot, past the compare that was the
+# last reader of r2, so the compare must no longer kill r2.
+
+--- |
+  declare void @callee()
+  define void @slot_kill() { ret void }
+...
+---
+name: slot_kill
+tracksRegLiveness: true
+body: |
+  bb.0:
+    liveins: $r1, $r2, $r3
+
+    ; CHECK-LABEL: name: slot_kill
+    ; CHECK: CMPEQ killed $r1, $r2, implicit-def $sr
+    ; CHECK: BUNDLE
+    ; CHECK-NEXT: JSR killed $r1
+    ; CHECK-NEXT: STL $r2, killed $r3
+    STL $r2, killed $r3 :: (store (s32))
+    CMPEQ killed $r1, killed $r2, implicit-def $sr
+    $r1 = MOVI -1
+    $r4 = NEGC killed $r1, implicit-def dead $sr, implicit killed $sr
+    $r1 = LOADCONST @callee
+    JSR killed $r1, csr_sh, implicit-def dead $pr, implicit killed $r4, implicit-def $r15, implicit-def $r0
+    RTS
+...
