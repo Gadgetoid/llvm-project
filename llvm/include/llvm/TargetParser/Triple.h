@@ -426,7 +426,8 @@ public:
 
     PAuthTest,
     MTIA,
-    LastEnvironmentType = MTIA
+    WinCE,
+    LastEnvironmentType = WinCE
   };
   enum ObjectFormatType {
     UnknownObjectFormat,
@@ -934,6 +935,10 @@ public:
 
   /// Tests whether the environment is mlibc.
   bool isMlibc() const { return getEnvironment() == Triple::Mlibc; }
+
+  /// Tests whether the environment is Windows CE on a bare ELF target, as
+  /// used for SuperH code that follows Microsoft's calling standard.
+  bool isWinCE() const { return getEnvironment() == Triple::WinCE; }
 
   /// Tests whether the environment is musl-libc
   bool isMusl() const {

@@ -590,34 +590,13 @@ static std::string computeVEDataLayout(const Triple &T) {
 }
 
 static std::string computeSuperHDataLayout(const Triple &T) {
-
-  // Mixed-endian
   std::string Ret = T.isLittleEndian() ? "e" : "E";
-
-  // ELF name manging
   Ret += getManglingComponent(T);
-
-  // 32-bit pointers, 32 bit aligned
   Ret += "-p:32:32";
-
-  // Integer alignments
-  Ret += "-i18:32";
-  Ret += "-i16:32";
-  Ret += "-i32:32";
-  Ret += "-i64:64";
-
-  // Floating alignments
-  Ret += "-f32:32";
-  Ret += "-f64:64";
-
-  // 32 bit alignment of objects of aggregate type
-  Ret += "-a:0:32";
-
-  // 32 bit native integer width
-  Ret += "-n32";
-
-  // 32 bit natural stack alignment
-  Ret += "-S32";
+  // Microsoft's SH compilers align 64-bit types naturally; GCC aligns them
+  // to 4 bytes.
+  Ret += T.isWinCE() ? "-i64:64-f64:64" : "-i64:32-f64:32";
+  Ret += "-n32-S32";
   return Ret;
 }
 
