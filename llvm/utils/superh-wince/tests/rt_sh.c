@@ -8,7 +8,7 @@ __attribute__((aligned(4))) static const unsigned short exit_code[] = {
 void rt_putc(int c) { ((void (*)(int))putc_code)(c); }
 void rt_exit(int status) { ((void (*)(int))exit_code)(status); }
 
-void *memcpy(void *dst, const void *src, unsigned long n) {
+void *memcpy(void *dst, const void *src, unsigned int n) {
   unsigned char *d = dst;
   const unsigned char *s = src;
   while (n--)
@@ -16,7 +16,7 @@ void *memcpy(void *dst, const void *src, unsigned long n) {
   return dst;
 }
 
-void *memmove(void *dst, const void *src, unsigned long n) {
+void *memmove(void *dst, const void *src, unsigned int n) {
   unsigned char *d = dst;
   const unsigned char *s = src;
   if (d < s) {
@@ -31,14 +31,14 @@ void *memmove(void *dst, const void *src, unsigned long n) {
   return dst;
 }
 
-void *memset(void *dst, int c, unsigned long n) {
+void *memset(void *dst, int c, unsigned int n) {
   unsigned char *d = dst;
   while (n--)
     *d++ = (unsigned char)c;
   return dst;
 }
 
-int memcmp(const void *a, const void *b, unsigned long n) {
+int memcmp(const void *a, const void *b, unsigned int n) {
   const unsigned char *x = a, *y = b;
   for (; n; n--, x++, y++)
     if (*x != *y)

@@ -35,6 +35,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/MC/MCDwarf.h"
 
 using namespace llvm;
 
@@ -112,11 +113,25 @@ bool SuperHFrameLowering::assignCalleeSavedSpillSlots(
   return true;
 }
 
+// Emits a CFI instruction for the debugger and unwinder.
+static void emitCFI(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                    const DebugLoc &DL, const MCCFIInstruction &Instruction) {
+  MachineFunction &MF = *MBB.getParent();
+  if (!MF.needsFrameMoves())
+    return;
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+  BuildMI(MBB, MI, DL, TII.get(TargetOpcode::CFI_INSTRUCTION))
+      .addCFIIndex(MF.addFrameInst(Instruction))
+      .setMIFlag(MachineInstr::FrameSetup);
+}
+
 bool SuperHFrameLowering::spillCalleeSavedRegisters(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
     ArrayRef<CalleeSavedInfo> CSI, const TargetRegisterInfo *TRI) const {
   const SuperHInstrInfo &TII = *STI.getInstrInfo();
   DebugLoc DL = MBB.findDebugLoc(MI);
+  const MCRegisterInfo *MRI = MBB.getParent()->getContext().getRegisterInfo();
+  int64_t Offset = 0;
   for (const CalleeSavedInfo &Info : CSI) {
     MCRegister Reg = Info.getReg();
     if (!MBB.isLiveIn(Reg))
@@ -130,6 +145,11 @@ bool SuperHFrameLowering::spillCalleeSavedRegisters(
           .addReg(Reg, RegState::Kill)
           .addReg(SH::R15)
           .setMIFlag(MachineInstr::FrameSetup);
+    Offset += 4;
+    emitCFI(MBB, MI, DL, MCCFIInstruction::cfiDefCfaOffset(nullptr, Offset));
+    emitCFI(MBB, MI, DL,
+            MCCFIInstruction::createOffset(
+                nullptr, MRI->getDwarfRegNum(Reg, true), -Offset));
   }
   return true;
 }
@@ -177,13 +197,23 @@ void SuperHFrameLowering::emitPrologue(MachineFunction &MF,
   DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
 
   // R1 holds nothing on entry under either convention.
-  TII.adjustRegister(MBB, MBBI, DL, SH::R15, -getLocalSize(MF), SH::R1,
+  int64_t LocalSize = getLocalSize(MF);
+  TII.adjustRegister(MBB, MBBI, DL, SH::R15, -LocalSize, SH::R1,
                      MachineInstr::FrameSetup);
+  int64_t StackSize = MF.getFrameInfo().getStackSize();
+  if (LocalSize)
+    emitCFI(MBB, MBBI, DL,
+            MCCFIInstruction::cfiDefCfaOffset(nullptr, StackSize));
 
-  if (hasFP(MF))
+  if (hasFP(MF)) {
     BuildMI(MBB, MBBI, DL, TII.get(SH::MOV), SH::R14)
         .addReg(SH::R15)
         .setMIFlag(MachineInstr::FrameSetup);
+    const MCRegisterInfo *MRI = MF.getContext().getRegisterInfo();
+    emitCFI(MBB, MBBI, DL,
+            MCCFIInstruction::createDefCfaRegister(
+                nullptr, MRI->getDwarfRegNum(SH::R14, true)));
+  }
 }
 
 void SuperHFrameLowering::emitEpilogue(MachineFunction &MF,

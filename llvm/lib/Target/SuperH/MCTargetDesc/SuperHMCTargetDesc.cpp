@@ -25,6 +25,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MachineLocation.h"
+#include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -94,6 +95,9 @@ static MCAsmInfo *createSuperHMCAsmInfo(const MCRegisterInfo &MRI,
                                         const Triple &TT,
                                         const MCTargetOptions &Options) {
   MCAsmInfo *MAI = new SuperHMCAsmInfo(TT, Options);
+  // On entry the CFA is r15.
+  unsigned SP = MRI.getDwarfRegNum(SH::R15, true);
+  MAI->addInitialFrameState(MCCFIInstruction::cfiDefCfa(nullptr, SP, 0));
   return MAI;
 }
 

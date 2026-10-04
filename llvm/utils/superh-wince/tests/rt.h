@@ -8,10 +8,10 @@ typedef long long i64;
 
 void rt_putc(int c);
 void rt_exit(int status);
-void *memcpy(void *dst, const void *src, unsigned long n);
-void *memset(void *dst, int c, unsigned long n);
-void *memmove(void *dst, const void *src, unsigned long n);
-int memcmp(const void *a, const void *b, unsigned long n);
+void *memcpy(void *dst, const void *src, unsigned int n);
+void *memset(void *dst, int c, unsigned int n);
+void *memmove(void *dst, const void *src, unsigned int n);
+int memcmp(const void *a, const void *b, unsigned int n);
 
 static void print_str(const char *s) {
   while (*s)

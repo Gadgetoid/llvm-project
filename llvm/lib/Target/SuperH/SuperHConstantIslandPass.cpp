@@ -207,6 +207,25 @@ bool SuperHConstantIslands::relaxConditionalBranch(MachineInstr &Branch) {
 }
 
 bool SuperHConstantIslands::relaxUnconditionalBranch(MachineInstr &Bundle) {
+  // The long sequence isn't a terminator, so it needs a block of its own if
+  // a conditional branch comes before it.
+  MachineBasicBlock *Parent = Bundle.getParent();
+  if (MachineBasicBlock::iterator(Bundle) != Parent->getFirstTerminator()) {
+    MachineBasicBlock *Own =
+        MF->CreateMachineBasicBlock(Parent->getBasicBlock());
+    MF->insert(std::next(Parent->getIterator()), Own);
+    Own->splice(Own->end(), Parent, MachineBasicBlock::iterator(Bundle),
+                Parent->end());
+    Own->transferSuccessors(Parent);
+    Parent->addSuccessor(Own);
+    for (MachineInstr &MI : Parent->terminators())
+      for (MachineOperand &MO : MI.operands())
+        if (MO.isMBB() && !Parent->isSuccessor(MO.getMBB()))
+          Parent->addSuccessor(MO.getMBB());
+    pruneSuccessors(*Own);
+    LivePhysRegs LiveRegs;
+    computeAndAddLiveIns(LiveRegs, *Own);
+  }
   MachineBasicBlock &MBB = *Bundle.getParent();
   MachineInstr &Branch = getBundledBranch(Bundle);
   MachineInstr &Slot = *std::next(Branch.getIterator());

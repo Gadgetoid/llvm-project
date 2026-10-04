@@ -26,6 +26,8 @@ SuperHMCAsmInfo::SuperHMCAsmInfo(const Triple &TheTriple,
   this->InternalSymbolPrefix = ".L";
   this->MinInstAlignment = 2;
   this->MaxInstLength = 2;
+  this->SupportsDebugInformation = true;
+  this->UsesCFIWithoutEH = true;
 
   // NOTE:  GAS SH Assembly uses Log2(N) alignment specifiers,
   //        we replicate those here.
