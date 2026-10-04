@@ -15,6 +15,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCObjectWriter.h"
+#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/EndianStream.h"
@@ -68,21 +69,35 @@ bool SuperHAsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
 void SuperHAsmBackend::applyFixup(const MCFragment &F, const MCFixup &Fixup,
                                   const MCValue &Target, uint8_t *Data,
                                   uint64_t Value, bool IsResolved) {
-  maybeAddReloc(F, Fixup, Target, Value, IsResolved);
-  if (!IsResolved)
+  unsigned Kind = Fixup.getKind();
+  auto WriteData = [&](uint64_t Bits) {
+    unsigned Size = MCAsmBackend::getFixupKindInfo(Kind).TargetSize / 8;
+    for (unsigned I = 0; I != Size; ++I) {
+      unsigned Index = Endian == llvm::endianness::little ? I : Size - 1 - I;
+      Data[Index] |= uint8_t(Bits >> (I * 8));
+    }
+  };
+
+  if (!IsResolved) {
+    auto &Writer = static_cast<ELFObjectWriter &>(Asm->getWriter());
+    auto &Relocations =
+        Writer.Relocations[static_cast<const MCSectionELF *>(F.getParent())];
+    size_t Count = Relocations.size();
+    maybeAddReloc(F, Fixup, Target, Value, IsResolved);
+    // GNU as also leaves the addend of a data relocation in the section
+    // contents, and GNU ld takes it from there rather than from r_addend.
+    if (Relocations.size() > Count && Kind < FirstTargetFixupKind &&
+        !mc::isRelocation(Kind))
+      WriteData(Relocations.back().Addend);
     return;
+  }
 
   MCContext &Ctx = getContext();
-  unsigned Kind = Fixup.getKind();
   if (mc::isRelocation(Kind))
     return;
 
   if (Kind < FirstTargetFixupKind) {
-    unsigned Size = MCAsmBackend::getFixupKindInfo(Kind).TargetSize / 8;
-    for (unsigned I = 0; I != Size; ++I) {
-      unsigned Index = Endian == llvm::endianness::little ? I : Size - 1 - I;
-      Data[Index] |= uint8_t(Value >> (I * 8));
-    }
+    WriteData(Value);
     return;
   }
 
