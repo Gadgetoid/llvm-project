@@ -1,13 +1,13 @@
 //===-- SuperHRegisterInfo.h - SuperH Register Information ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
-// This file contains the SuperH implementation of the TargetRegisterInfo class.
+// This file contains the SuperH implementation of the TargetRegisterInfo
+// class.
 //
 //===----------------------------------------------------------------------===//
 
@@ -23,9 +23,6 @@ namespace llvm {
 class SuperHSubtarget;
 
 class SuperHRegisterInfo : public SuperHGenRegisterInfo {
-protected:
-  const SuperHSubtarget &STI;
-
 public:
   SuperHRegisterInfo(const SuperHSubtarget &STI);
 
@@ -36,18 +33,28 @@ public:
   BitVector getReservedRegs(const MachineFunction &MF) const override;
   Register getFrameRegister(const MachineFunction &MF) const override;
 
+  const TargetRegisterClass *
+  getLargestLegalSuperClass(const TargetRegisterClass *RC,
+                            const MachineFunction &MF) const override;
+
+  const TargetRegisterClass *
+  getCrossCopyRegClass(const TargetRegisterClass *RC) const override;
+
+  bool shouldCoalesce(MachineInstr *MI, const TargetRegisterClass *SrcRC,
+                      unsigned SubReg, const TargetRegisterClass *DstRC,
+                      unsigned DstSubReg, const TargetRegisterClass *NewRC,
+                      LiveIntervals &LIS) const override;
+
+  bool requiresRegisterScavenging(const MachineFunction &MF) const override {
+    return true;
+  }
+  bool eliminateFrameIndicesBackwards() const override { return true; }
+
   bool eliminateFrameIndex(MachineBasicBlock::iterator II, int SPAdj,
                            unsigned FIOperandNum,
                            RegScavenger *RS = nullptr) const override;
-
-  bool requiresRegisterScavenging(const MachineFunction &MF) const override { return true; }
-
-  // Helpers
-  Register getFrameRegister() const;
-  Register getStackRegister() const;
-  Register getGOTRegister() const;
 };
 
 } // end namespace llvm
 
-#endif // end LLVM_LIB_TARGET_SUPERH_SUPERHREGISTERINFO_H
+#endif // LLVM_LIB_TARGET_SUPERH_SUPERHREGISTERINFO_H

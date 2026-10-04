@@ -5,7 +5,6 @@ set(LLVM_TARGET_DEFINITIONS SuperH.td)
 tablegen(LLVM SuperHGenAsmMatcher.inc         -gen-asm-matcher)
 tablegen(LLVM SuperHGenAsmWriter.inc          -gen-asm-writer)
 tablegen(LLVM SuperHGenDAGISel.inc            -gen-dag-isel)
-tablegen(LLVM SuperHGenCallingConv.inc        -gen-callingconv)
 tablegen(LLVM SuperHGenDisassemblerTables.inc -gen-disassembler)
 tablegen(LLVM SuperHGenRegisterInfo.inc       -gen-register-info)
 tablegen(LLVM SuperHGenInstrInfo.inc          -gen-instr-info)
@@ -19,8 +18,6 @@ add_public_tablegen_target(SuperHCommonTableGen)
 add_llvm_target(SuperHCodeGen
   SuperHTargetMachine.cpp
   SuperHFrameLowering.cpp
-  SuperHConstantPoolValue.cpp
-  SuperHBasicBlockInfo.cpp
   SuperHMachineFunctionInfo.cpp
   SuperHRegisterInfo.cpp
   SuperHInstrInfo.cpp
@@ -32,7 +29,6 @@ add_llvm_target(SuperHCodeGen
   SuperHSubtarget.cpp
   SuperHFillDelaySlots.cpp
   SuperHConstantIslandPass.cpp
-  SuperHExpandPseudoInsts.cpp
 
   LINK_COMPONENTS
   Analysis
@@ -54,5 +50,6 @@ add_llvm_target(SuperHCodeGen
   )
 
 add_subdirectory(AsmParser)
+add_subdirectory(Disassembler)
 add_subdirectory(MCTargetDesc)
 add_subdirectory(TargetInfo)

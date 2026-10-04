@@ -1,4 +1,4 @@
-//===-- SuperHFillDelaySlots.cpp - Reordering pass to fill delay slots ----===//
+//===-- SuperHFillDelaySlots.cpp - Fill SuperH branch delay slots ---------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,30 +6,41 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file contains a pass that fills delay slots of branching instructions.
+// Gives every instruction with a delay slot (bra, jmp, jsr, rts, ...) its slot
+// instruction and bundles the pair. The slot gets an earlier instruction from
+// the same block when one can be moved past everything in between without
+// changing the result, and a nop otherwise.
 //
 //===----------------------------------------------------------------------===//
 
 #include "MCTargetDesc/SuperHMCTargetDesc.h"
 #include "SuperH.h"
 #include "SuperHInstrInfo.h"
-#include "SuperHTargetMachine.h"
-
-#include "llvm/CodeGen/MachineFunction.h"
+#include "SuperHSubtarget.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
-#include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/TargetRegisterInfo.h"
-#include "llvm/Support/DebugLog.h"
+#include "llvm/CodeGen/MachineInstrBundle.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "sh-fill-delay-slots"
-#define SUPERH_FILL_DELAY_SLOTS_NAME "SuperH delay slot filling pass"
+
+static cl::opt<bool> DisableDelaySlotFiller(
+    "sh-disable-delay-slot-filler", cl::Hidden, cl::init(false),
+    cl::desc("Fill SuperH delay slots with nops only"));
+
+static cl::opt<unsigned> DelaySlotSearchLimit(
+    "sh-delay-slot-search-limit", cl::Hidden, cl::init(8),
+    cl::desc("How many instructions to look back for a delay slot candidate"));
 
 namespace {
+
 class SuperHFillDelaySlots : public MachineFunctionPass {
+  const SuperHInstrInfo *TII = nullptr;
+  const TargetRegisterInfo *TRI = nullptr;
+
 public:
   static char ID;
 
@@ -37,166 +48,140 @@ public:
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().setNoVRegs();
+  }
+
   StringRef getPassName() const override {
-    return SUPERH_FILL_DELAY_SLOTS_NAME;
+    return "SuperH delay slot filler";
   }
 
 private:
-  typedef MachineBasicBlock Block;
-  typedef Block::iterator BlockIt;
-
-  const SuperHRegisterInfo *TRI;
-  const SuperHInstrInfo *TII;
-
-  bool hasDelaySlot(MachineInstr &I);
-  bool expandMBB(Block &MBB);
-  bool expandMI(Block &MBB, BlockIt MBBI);
-
-  // Expansion functions
-  MachineInstr *findSlotCandidate(Block &MBB, BlockIt MBBI);
-  bool fillDelaySlot(Block &MBB, BlockIt MBBI);
+  MachineInstr *findCandidate(MachineBasicBlock &MBB, MachineInstr &Branch);
+  bool canMovePast(const MachineInstr &Candidate, const MachineInstr &Other);
+  bool conflictsWithBranch(const MachineInstr &Candidate,
+                           const MachineInstr &Branch);
 };
 
-} // end namespace
-
-
-
-
-//===----------------------------------------------------------------------===//
-//                                Expansions
-//===----------------------------------------------------------------------===//
-
-// Walks backwards through the basic block to find a candidate that is eligible
-// for filling delay slots.
-MachineInstr *SuperHFillDelaySlots::findSlotCandidate(Block &MBB,
-                                                      BlockIt MBBI) {
-  MachineInstr &MI = *MBBI;
-  auto *Prev = MBBI->getPrevNode();
-
-  // Instructions that fall through should not get their delay slots filled.
-  if (MBB.getLastNonDebugInstr() == MBBI)
-    return nullptr;
-
-  // // We might have a useful instruction above the instruction that
-  // // loads our destination address.
-  // if (MI.isCall() && Prev) {
-  //   if (!Prev->getPrevNode()->definesRegister(MI.getOperand(0).getReg(),
-  //   TRI))
-  //     Prev = Prev->getPrevNode();
-  // }
-
-  // TODO:  Make this a while loop that keeps a list of "used" registers
-  //        by instructions.
-  if (Prev) {
-    unsigned Opcode = Prev->getOpcode();
-
-    // If we encounter a branch instruction, then it's no longer safe to
-    // move the instruction down.
-    if (Prev->isBranch() || Prev->isCall() || Prev->isReturn())
-      return nullptr;
-
-    // NOTE:  RTS has an extra constraint that it cannot have
-    //        lds @r15+,PR or equivalent in its delay slot.
-    if (MI.isReturn()) {
-
-      // Skip the LDS instruction.
-      if (Opcode == SH::LDSPR || Opcode == SH::LDSMPR)
-        return nullptr;
-    }
-
-    // NOTE:  Conditional branches can't have their condition code set
-    //        in the delay slot. As such, if the previous instruction
-    //        implicitly defines the status register, assume that the
-    //        T bit was set.
-    if (MI.isConditionalBranch()) {
-      if (Prev->definesRegister(SH::SR, TRI))
-        return nullptr;
-    }
-
-    // Otherwise, select this instruction if can fill a delay slot,
-    // has no prior node, or the prior node is not a delay slot.
-    if (TII->canFillDelaySlot(Opcode)) {
-      if (!Prev->getPrevNode() || !Prev->getPrevNode()->hasDelaySlot())
-        return Prev;
-    }
-  }
-
-  return nullptr;
-}
-
-// Finds and fills delay slots of instructions in a basic block.
-bool SuperHFillDelaySlots::fillDelaySlot(Block &MBB, BlockIt MBBI) {
-  MachineFunction &MF = *MBB.getParent();
-  MachineInstr &MI = *MBBI;
-
-  if (auto *Candidate = findSlotCandidate(MBB, MBBI)) {
-    LLVM_DEBUG(dbgs() << "Swapping " << TII->getName(MI.getOpcode()) << " and "
-                      << TII->getName(Candidate->getOpcode()) << " @ "
-                      << MBB.getParent()->getName() << "\n");
-
-    MBB.insertAfter(MBBI, Candidate->removeFromParent());
-    return true;
-  }
-
-  LLVM_DEBUG(dbgs() << "Inserting NOP after " << TII->getName(MI.getOpcode())
-                    << " @ " << MBB.getParent()->getName() << "\n");
-
-  // Otherwise just insert a NOP.
-  MBB.insertAfter(MBBI,
-                  MF.CreateMachineInstr(TII->get(SH::NOP), MI.getDebugLoc()));
-  return true;
-}
-
-
-
-
-//===----------------------------------------------------------------------===//
-//                                Helpers
-//===----------------------------------------------------------------------===//
-
-bool SuperHFillDelaySlots::expandMI(Block &MBB, BlockIt MBBI) {
-  MachineInstr &MI = *MBBI;
-
-  if (MI.hasDelaySlot()) {
-    return fillDelaySlot(MBB, MBBI);
-  }
-
-  return false;
-}
-
-bool SuperHFillDelaySlots::expandMBB(Block &MBB) {
-  bool Modified = false;
-
-  BlockIt MBBI = MBB.begin(), E = MBB.end();
-  while (MBBI != E) {
-    BlockIt NMBBI = std::next(MBBI);
-    Modified |= expandMI(MBB, MBBI);
-    MBBI = NMBBI;
-  }
-
-  return Modified;
-}
-
-bool SuperHFillDelaySlots::runOnMachineFunction(MachineFunction &MF) {
-  LLVM_DEBUG(dbgs() << "\n********** SuperHFillDelaySlots **********\n");
-
-  bool Modified = false;
-
-  const SuperHSubtarget &STI = MF.getSubtarget<SuperHSubtarget>();
-  TRI = STI.getRegisterInfo();
-  TII = STI.getInstrInfo();
-
-  for (Block &MBB : MF) {
-    Modified |= expandMBB(MBB);
-  }
-
-  return Modified;
-}
+} // end anonymous namespace
 
 char SuperHFillDelaySlots::ID = 0;
 
-INITIALIZE_PASS(SuperHFillDelaySlots, "sh-fill-delay-slots",
-                SUPERH_FILL_DELAY_SLOTS_NAME, false, false)
+INITIALIZE_PASS(SuperHFillDelaySlots, DEBUG_TYPE, "SuperH delay slot filler",
+                false, false)
+
+static bool readsOrWrites(const MachineInstr &MI, Register Reg,
+                          const TargetRegisterInfo *TRI) {
+  return MI.readsRegister(Reg, TRI) || MI.modifiesRegister(Reg, TRI);
+}
+
+// Whether Candidate, which comes before Other, can be moved after it.
+bool SuperHFillDelaySlots::canMovePast(const MachineInstr &Candidate,
+                                       const MachineInstr &Other) {
+  if (Other.isDebugInstr())
+    return true;
+  if (Other.isCall() || Other.isTerminator() || Other.isInlineAsm() ||
+      Other.hasUnmodeledSideEffects() || Other.isBundle())
+    return false;
+  if ((Candidate.mayStore() && (Other.mayLoad() || Other.mayStore())) ||
+      (Candidate.mayLoad() && Other.mayStore()))
+    return false;
+  for (const MachineOperand &MO : Candidate.operands()) {
+    if (!MO.isReg() || !MO.getReg())
+      continue;
+    Register Reg = MO.getReg();
+    if (MO.isDef() && readsOrWrites(Other, Reg, TRI))
+      return false;
+    if (MO.isUse() && Other.modifiesRegister(Reg, TRI))
+      return false;
+  }
+  return true;
+}
+
+// Whether placing Candidate in Branch's delay slot changes what the branch
+// does. The slot still runs before control reaches the target, but after the
+// branch has read the registers that decide the target: jmp, jsr and braf
+// read their operand, rts reads PR, and jsr writes PR before the slot.
+bool SuperHFillDelaySlots::conflictsWithBranch(const MachineInstr &Candidate,
+                                               const MachineInstr &Branch) {
+  for (const MachineOperand &MO : Branch.explicit_operands())
+    if (MO.isReg() && MO.getReg() && Candidate.modifiesRegister(MO.getReg(), TRI))
+      return true;
+  if (Branch.readsRegister(SH::SR, TRI) &&
+      Candidate.modifiesRegister(SH::SR, TRI))
+    return true;
+  return Candidate.readsRegister(SH::PR, TRI) ||
+         Candidate.modifiesRegister(SH::PR, TRI);
+}
+
+MachineInstr *SuperHFillDelaySlots::findCandidate(MachineBasicBlock &MBB,
+                                                  MachineInstr &Branch) {
+  if (DisableDelaySlotFiller)
+    return nullptr;
+  MachineBasicBlock::iterator I = Branch.getIterator();
+  SmallVector<MachineInstr *, 8> Between;
+  for (unsigned Count = 0; I != MBB.begin() && Count < DelaySlotSearchLimit;) {
+    --I;
+    MachineInstr &MI = *I;
+    if (MI.isDebugInstr())
+      continue;
+    ++Count;
+    if (MI.isBundled() || MI.isBundle())
+      return nullptr;
+    // Keep the prologue in the shape the standard's unwinder expects.
+    if (MI.getFlag(MachineInstr::FrameSetup))
+      return nullptr;
+    if (TII->isDelaySlotCandidate(MI) && !conflictsWithBranch(MI, Branch) &&
+        all_of(Between, [&](MachineInstr *Other) {
+          return canMovePast(MI, *Other);
+        }))
+      return &MI;
+    if (MI.isCall() || MI.isTerminator() || MI.isInlineAsm() ||
+        MI.hasUnmodeledSideEffects() || MI.isLabel())
+      return nullptr;
+    Between.push_back(&MI);
+  }
+  return nullptr;
+}
+
+bool SuperHFillDelaySlots::runOnMachineFunction(MachineFunction &MF) {
+  TII = MF.getSubtarget<SuperHSubtarget>().getInstrInfo();
+  TRI = MF.getSubtarget().getRegisterInfo();
+  bool Changed = false;
+
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineBasicBlock::instr_iterator I = MBB.instr_begin();
+         I != MBB.instr_end(); ++I) {
+      MachineInstr &Branch = *I;
+      if (!Branch.hasDelaySlot() && Branch.getOpcode() != SH::PseudoBR)
+        continue;
+      if (Branch.isBundledWithSucc())
+        continue;
+
+      MachineInstr *Slot = findCandidate(MBB, Branch);
+      if (Slot) {
+        Slot->removeFromParent();
+        MBB.insertAfter(Branch.getIterator(), Slot);
+        // A call's argument registers are read by the callee, after the
+        // slot; the call itself no longer sees a value from before it.
+        for (MachineOperand &MO : Branch.implicit_operands())
+          if (MO.isReg() && MO.isUse() &&
+              Slot->modifiesRegister(MO.getReg(), TRI)) {
+            MO.setIsUndef(true);
+            MO.setIsKill(false);
+          }
+      } else {
+        BuildMI(MBB, std::next(Branch.getIterator()), Branch.getDebugLoc(),
+                TII->get(SH::NOP));
+      }
+      finalizeBundle(MBB, Branch.getIterator(),
+                     std::next(Branch.getIterator(), 2));
+      Changed = true;
+      ++I;
+    }
+  }
+  return Changed;
+}
 
 FunctionPass *llvm::createSuperHFillDelaySlotsPass() {
   return new SuperHFillDelaySlots();

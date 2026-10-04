@@ -30,7 +30,6 @@
 namespace llvm {
 class StringRef;
 
-typedef unsigned char SHRefClass;
 
 class SuperHSubtarget : public SuperHGenSubtargetInfo {
   const TargetMachine &TM;
@@ -68,28 +67,8 @@ public:
   bool isTargetELF() const { return getTargetTriple().isOSBinFormatELF(); }
   bool isPositionIndependent() const { return TM.isPositionIndependent(); }
 
-  // Classification functions
-  SHRefClass classifyLocalReference(const GlobalValue *GV) const;
-
-  /// Classify a global variable reference for the current subtarget according
-  /// to how we should reference it in a non-pcrel context.
-  SHRefClass classifyGlobalReference(const GlobalValue *GV,
-                                     const Module &M) const;
-  SHRefClass classifyGlobalReference(const GlobalValue *GV) const;
-
-  /// Classify a external variable reference for the current subtarget according
-  /// to how we should reference it in a non-pcrel context.
-  SHRefClass classifyExternalReference(const Module &M) const;
-
-  /// Classify a global function reference for the current subtarget.
-  SHRefClass classifyGlobalFunctionReference(const GlobalValue *GV,
-                                             const Module &M) const;
-  SHRefClass
-  classifyGlobalFunctionReference(const GlobalValue *GV) const override;
-
-  /// Classify a blockaddress reference for the current subtarget according to
-  /// how we should reference it in a non-pcrel context.
-  SHRefClass classifyBlockAddressReference() const;
+  /// Whether code follows Microsoft's Windows CE SH-3 calling standard.
+  bool isTargetWinCE() const { return getTargetTriple().isWinCE(); }
 
 #define GET_SUBTARGETINFO_MACRO(ATTRIBUTE, DEFAULT, GETTER)                    \
   bool GETTER() const { return ATTRIBUTE; }

@@ -6,38 +6,33 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_SUPERH_MCINST_LOWER_H
-#define LLVM_SUPERH_MCINST_LOWER_H
-
-#include "SuperHSubtarget.h"
-#include "llvm/Support/Compiler.h"
+#ifndef LLVM_LIB_TARGET_SUPERH_SUPERHMCINSTLOWER_H
+#define LLVM_LIB_TARGET_SUPERH_SUPERHMCINSTLOWER_H
 
 namespace llvm {
-
 class AsmPrinter;
 class MachineInstr;
 class MachineOperand;
 class MCContext;
+class MCExpr;
 class MCInst;
 class MCOperand;
-class MCSymbol;
 
-/// Lowers `MachineInstr` objects into `MCInst` objects.
+/// Lowers MachineInstrs and their operands to MC.
 class SuperHMCInstLower {
+  MCContext &Ctx;
+  AsmPrinter &Printer;
+
 public:
   SuperHMCInstLower(MCContext &Ctx, AsmPrinter &Printer)
       : Ctx(Ctx), Printer(Printer) {}
 
-  /// Lowers a `MachineInstr` into a `MCInst`.
   void lowerInstruction(const MachineInstr &MI, MCInst &OutMI) const;
-  MCOperand lowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym,
-                               const SuperHSubtarget &Subtarget) const;
 
-private:
-  MCContext &Ctx;
-  AsmPrinter &Printer;
+  /// The expression for a symbolic or immediate operand.
+  const MCExpr *lowerExpression(const MachineOperand &MO) const;
 };
 
 } // end namespace llvm
 
-#endif // LLVM_SUPERH_MCINST_LOWER_H
+#endif // LLVM_LIB_TARGET_SUPERH_SUPERHMCINSTLOWER_H

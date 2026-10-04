@@ -11,25 +11,25 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_TARGET_SUPERH_SUPERHMACHINEFUNCTION_H
-#define LLVM_LIB_TARGET_SUPERH_SUPERHMACHINEFUNCTION_H
+#ifndef LLVM_LIB_TARGET_SUPERH_SUPERHMACHINEFUNCTIONINFO_H
+#define LLVM_LIB_TARGET_SUPERH_SUPERHMACHINEFUNCTIONINFO_H
 
-#include "SuperHConstantPoolValue.h"
-#include "llvm/ADT/BitVector.h"
-#include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/Register.h"
-#include "llvm/CodeGen/SelectionDAGNodes.h"
-#include "llvm/CodeGenTypes/MachineValueType.h"
 
 namespace llvm {
 
 class SuperHMachineFunctionInfo : public MachineFunctionInfo {
+  /// Frame index of the first variadic argument.
+  int VarArgsFrameIndex = 0;
 
-  /// CPIndexCount - How many constant pool indices are allocated.
-  unsigned CPIndexCount = 0;
+  /// Virtual register holding the hidden structure return pointer.
+  Register SRetReturnReg;
 
-  BitVector UsedRegs;
+  /// Bytes of callee-saved registers pushed by the prologue.
+  unsigned CalleeSavedSize = 0;
+
+  /// Counter for literal pool labels.
+  unsigned NextLiteralLabel = 0;
 
 public:
   explicit SuperHMachineFunctionInfo(const Function &F,
@@ -40,51 +40,18 @@ public:
         const DenseMap<MachineBasicBlock *, MachineBasicBlock *> &Src2DstMBB)
       const override;
 
-  // getConstIndexCount - Gets the amount of PIC Labels that have been
-  // created thus far.
-  unsigned getConstIndexCount() const { return CPIndexCount; }
+  int getVarArgsFrameIndex() const { return VarArgsFrameIndex; }
+  void setVarArgsFrameIndex(int Index) { VarArgsFrameIndex = Index; }
 
-  // createConstIndex - Creates a new PIC Label UId.
-  unsigned createConstIndex() { return CPIndexCount++; }
+  Register getSRetReturnReg() const { return SRetReturnReg; }
+  void setSRetReturnReg(Register Reg) { SRetReturnReg = Reg; }
 
-  // tryGetConstant - SuperH's compressed instruction set means that
-  // immediates and displacements can not be larger than 8 bits.
-  // As such we need to store said immediates and displacements within
-  // constants that are within range of the program counter.
-  //
-  // As such this function is a helper that:
-  //  1. Allocates a constant pool slot for a given node
-  //  2. Inserts the target into said slot.
-  //  3. Returns the allocated slot, ready to be loaded via
-  //     a PC-relative load.
-  SuperHConstantPoolConstant *tryGetConstant(GlobalAddressSDNode *N,
-                                             SelectionDAG &DAG,
-                                             SHCP::SHCPModifier Modifier);
-  SuperHConstantPoolConstant *tryGetConstant(BlockAddressSDNode *N,
-                                             SelectionDAG &DAG,
-                                             SHCP::SHCPModifier Modifier);
-  SuperHConstantPoolConstant *tryGetConstant(ConstantSDNode *N,
-                                             SelectionDAG &DAG,
-                                             SHCP::SHCPModifier Modifier);
-  SuperHConstantPoolConstant *tryGetConstant(ConstantFPSDNode *N,
-                                             SelectionDAG &DAG,
-                                             SHCP::SHCPModifier Modifier);
-  SuperHConstantPoolSymbol *tryGetConstant(ExternalSymbolSDNode *N,
-                                           SelectionDAG &DAG,
-                                           SHCP::SHCPModifier Modifier);
+  unsigned getCalleeSavedSize() const { return CalleeSavedSize; }
+  void setCalleeSavedSize(unsigned Size) { CalleeSavedSize = Size; }
 
-  // Helper for lower level passes that gets global value constants.
-  SuperHConstantPoolConstant *tryGetConstant(const GlobalValue *G,
-                                             const MachineFunction &MF) const;
-
-  // Helpers for lower level passes to create constants.
-  SuperHConstantPoolConstant *getOrCreate(const ConstantInt *G,
-                                          const MachineFunction &MF) const;
-
-private:
-  virtual void anchor();
+  unsigned createLiteralLabel() { return NextLiteralLabel++; }
 };
 
 } // namespace llvm
 
-#endif
+#endif // LLVM_LIB_TARGET_SUPERH_SUPERHMACHINEFUNCTIONINFO_H

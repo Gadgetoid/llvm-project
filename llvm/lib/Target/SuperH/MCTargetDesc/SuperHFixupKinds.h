@@ -1,4 +1,4 @@
-//===-- SuperHFixupKinds.h - SuperH Specific Fixup Entries ------*- C++ -*-===//
+//===-- SuperHFixupKinds.h - SuperH specific fixup entries ------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,47 +6,30 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_SUPERH_FIXUP_KINDS_H
-#define LLVM_SUPERH_FIXUP_KINDS_H
+#ifndef LLVM_LIB_TARGET_SUPERH_MCTARGETDESC_SUPERHFIXUPKINDS_H
+#define LLVM_LIB_TARGET_SUPERH_MCTARGETDESC_SUPERHFIXUPKINDS_H
 
 #include "llvm/MC/MCFixup.h"
 
 namespace llvm {
 namespace SH {
 
-// clang-format off
-
-/// The set of supported fixups.
 enum Fixups {
-  fixup_32 = FirstTargetFixupKind,
-  
-  /// A fixup that represents a PC-relative address scaled by 2.
-  fixup_pcrel4_by2,
+  /// bt, bf, bt/s, bf/s: 8-bit displacement in halfwords from PC + 4.
+  fixup_sh_branch8 = FirstTargetFixupKind,
+  /// bra, bsr: 12-bit displacement in halfwords from PC + 4.
+  fixup_sh_branch12,
+  /// mov.w @(disp,PC): 8-bit unsigned displacement in halfwords from PC + 4.
+  fixup_sh_pcrel8x2,
+  /// mov.l @(disp,PC), mova: 8-bit unsigned displacement in words from
+  /// (PC & ~3) + 4.
+  fixup_sh_pcrel8x4,
 
-  /// A fixup that represents a PC-relative address scaled by 4.
-  fixup_pcrel4_by4,
-
-  /// A fixup that represents a PC-relative address scaled by 4.
-  fixup_pcrel8_by4,
-
-  /// A fixup that represents a PC-relative address scaled by 2,
-  /// with a 4-byte offset.
-  fixup_pcrel8_4by2,
-
-  /// A fixup that represents a PC-relative address scaled by 4,
-  /// with a 4-byte offset.
-  fixup_pcrel8_4by4,
-
-  /// A fixup that represents a PC-relative address scaled by 2,
-  /// with a 4-byte offset.
-  fixup_pcrel12_4by2,
-
-  // Marker
   LastTargetFixupKind,
-  NumTargetFixupKinds = LastTargetFixupKind - FirstTargetFixupKind,
+  NumTargetFixupKinds = LastTargetFixupKind - FirstTargetFixupKind
 };
 
-} // namespace SuperH
+} // namespace SH
 } // namespace llvm
 
-#endif // LLVM_SUPERH_FIXUP_KINDS_H
+#endif // LLVM_LIB_TARGET_SUPERH_MCTARGETDESC_SUPERHFIXUPKINDS_H

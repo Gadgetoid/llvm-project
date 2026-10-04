@@ -1,13 +1,28 @@
-//===- SuperHFrameLowering.cpp - SuperH Frame Information ------*- C++ -*-===//
+//===- SuperHFrameLowering.cpp - SuperH Frame Information -----------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
-// This file contains the SuperHTargetFrameLowering class.
+// This file contains the SuperH implementation of TargetFrameLowering.
+//
+// The frame follows the Windows CE SH-3 calling standard, which the GNU
+// convention is compatible with:
+//
+//   incoming stack arguments          sp_entry + 16 ...  (sp_entry + 0 GNU)
+//   home area for R4-R7 (Windows CE)  sp_entry + 0 .. 15
+//   ------------------------------------------------ sp_entry
+//   register save area: R14, R8-R13, PR, pushed in that order
+//   locals and spill slots
+//   outgoing argument area            sp + 0 ...
+//   ------------------------------------------------ sp (and R14 when used)
+//
+// The prologue is the sequence the standard's virtual unwinder expects:
+//
+//   mov.l r14,@-r15 ; mov.l r8,@-r15 ; ... ; sts.l pr,@-r15
+//   add #-n,r15 (or a literal and add) ; mov r15,r14
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,409 +30,186 @@
 #include "MCTargetDesc/SuperHMCTargetDesc.h"
 #include "SuperHInstrInfo.h"
 #include "SuperHMachineFunctionInfo.h"
-#include "SuperHRegisterInfo.h"
 #include "SuperHSubtarget.h"
-#include "llvm/ADT/APInt.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
-#include "llvm/CodeGen/RegisterScavenging.h"
-#include "llvm/CodeGen/TargetInstrInfo.h"
-#include "llvm/IR/DIBuilder.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCRegister.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/DebugLog.h"
-#include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/MathExtras.h"
-#include "llvm/Support/TypeSize.h"
-#include "llvm/Target/TargetMachine.h"
-#include <cstdint>
-
-#define DEBUG_TYPE "sh-framelowering"
-
-static cl::opt<bool> AccumOutgoingArgs(
-    "sh-accumulate-outgoing-args", cl::Hidden, cl::init(false),
-    cl::desc("Reserve space for outgoing arguments in the function prologue."));
-
-static cl::opt<int64_t> MaxSPAdd(
-    "sh-max-sp-add", cl::Hidden, cl::init(10),
-    cl::desc("How many add instructions are deemed low enough cost to generate for sp adjust."));
+#include "llvm/CodeGen/MachineRegisterInfo.h"
 
 using namespace llvm;
 
+#define DEBUG_TYPE "sh-framelowering"
 
-
-
-//===--------------------------------------------------------------------------===//
-//                                    Helpers
-//===--------------------------------------------------------------------------===//
-
-// Helper to emit stack pointer adjustment.
-void SuperHFrameLowering::emitFrameAdjust(Register Base, MachineBasicBlock &MBB,
-                                          MachineBasicBlock::iterator MBBI, 
-                                          int32_t AdjValue) const {
-  const SuperHInstrInfo &TII = *STI.getInstrInfo();
-  MachineInstr::MIFlag MFlag = AdjValue < 0 ? 
-    MachineInstr::FrameSetup : MachineInstr::FrameDestroy;
-  TII.emitAddressAdjust(Base, MBB, MBBI, AdjValue, MaxSPAdd, MFlag);
-}
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//                              Call-Frame Objects
-//===--------------------------------------------------------------------------===//
-
-StackOffset
-SuperHFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
-                                            Register &FrameReg) const {
-  const SuperHSubtarget &Subtarget = MF.getSubtarget<SuperHSubtarget>();
-  const SuperHRegisterInfo *RegInfo = Subtarget.getRegisterInfo();
+bool SuperHFrameLowering::hasFPImpl(const MachineFunction &MF) const {
   const MachineFrameInfo &MFI = MF.getFrameInfo();
-  bool HasFP = hasFP(MF);
-
-  // NOTE:  All the frame indices are relative to the stack/frame pointer
-  //        post-offset. as such an extra adjustment is needed here.
-  int64_t FrameOffset = MFI.getObjectOffset(FI);
-
-  // R14 base
-  if (HasFP) {
-
-    // Adjust down to remove FP.
-    FrameOffset -= 4;
-    FrameReg = RegInfo->getFrameRegister();
-    return StackOffset::getFixed(FrameOffset);
-  }
-
-  // R15 base
-  FrameReg = RegInfo->getStackRegister(); // r15
-  return StackOffset::getFixed(FrameOffset);
+  return MF.disableFramePointerElim() ||
+         MFI.hasVarSizedObjects() || MFI.isFrameAddressTaken();
 }
 
-
-
-
-//===--------------------------------------------------------------------------===//
-//                          Prologue/Epilogue Emission
-//===--------------------------------------------------------------------------===//
-
-void SuperHFrameLowering::emitPrologue(MachineFunction &MF,
-                                       MachineBasicBlock &MBB) const {
-  LLVM_DEBUG(dbgs() << "Emitting prologue for " << MF.getName() << "...\n");
-
-  MachineBasicBlock::iterator MBBI = MBB.begin();
-  MachineFrameInfo &MFI = MF.getFrameInfo();
-  const SuperHSubtarget &STI = MF.getSubtarget<SuperHSubtarget>();
-  const SuperHInstrInfo &TII = *STI.getInstrInfo();
-  const SuperHRegisterInfo &RII = *STI.getRegisterInfo();
-  const MCContext &Ctx = MF.getContext();
-  Register SP = RII.getStackRegister();
-  Register FP = RII.getFrameRegister();
-  Register GOT = RII.getGOTRegister();
-  DebugLoc DL = (MBBI != MBB.end()) ? MBBI->getDebugLoc() : DebugLoc();
-  bool HasFP = hasFP(MF);
-
-  // Get stack frame size, align up to 32-bits if needed.
-  int64_t StackSize = MFI.getStackSize();
-  if (StackSize < 4)
-    StackSize = 4;
-
-  MFI.setStackSize(StackSize);
-
-  // Store previous frame pointer.
-  if (HasFP) {
-    BuildMI(MBB, MBBI, DL, TII.get(SH::MOVLM), FP)
-        .addReg(SP)
-        .setMIFlag(MachineInstr::FrameSetup);
-  }
-
-  // Store Return address on stack (if needed)
-  if (MFI.hasCalls()) {
-    BuildMI(MBB, MBBI, DL, TII.get(SH::STSMPR))
-        .addReg(SP)
-        .setMIFlag(MachineInstr::FrameSetup);
-  }
-
-  // Create new stack frame.
-  emitFrameAdjust(SP, MBB, MBBI, -StackSize);
-  if (HasFP) {
-    BuildMI(MBB, MBBI, DL, TII.get(SH::MOV), FP)
-        .addReg(SP)
-        .setMIFlag(MachineInstr::FrameSetup);
-  }
-
-  // // Store GOT
-  // if (STI.isPositionIndependent()) {
-  //   if (auto *GOTSym = MF.getPICBaseSymbol()) {
-  //     BuildMI(MBB, MBBI, DL, TII.get(SH::MOVLM), SP)
-  //       .addReg(GOT)
-  //       .setMIFlag(MachineInstr::FrameSetup);
-  //   }
-  // }
+bool SuperHFrameLowering::hasReservedCallFrame(
+    const MachineFunction &MF) const {
+  return !MF.getFrameInfo().hasVarSizedObjects();
 }
 
-void SuperHFrameLowering::emitEpilogue(MachineFunction &MF,
-                                       MachineBasicBlock &MBB) const {
-  LLVM_DEBUG(dbgs() << "Emitting epilogue for " << MF.getName() << "...\n");
-
-  MachineBasicBlock::iterator MBBI = MBB.getLastNonDebugInstr();
-  const SuperHRegisterInfo &RII = *STI.getRegisterInfo();
-  const SuperHSubtarget &STI = MF.getSubtarget<SuperHSubtarget>();
-  const SuperHInstrInfo &TII = *STI.getInstrInfo();
-  MachineFrameInfo &MFI = MF.getFrameInfo();
-  Register SP = RII.getStackRegister();
-  Register FP = RII.getFrameRegister();
-  DebugLoc DL = (MBBI != MBB.end()) ? MBBI->getDebugLoc() : DebugLoc();
-  bool HasFP = hasFP(MF);
-
-  // Get stack frame size.
-  int64_t StackSize = MFI.getStackSize();
-
-  // Restore stack frame
-  if (HasFP) {
-    emitFrameAdjust(FP, MBB, MBBI, StackSize);
-    BuildMI(MBB, MBBI, DL, TII.get(SH::MOV), SP)
-        .addReg(FP)
-        .setMIFlag(MachineInstr::FrameSetup);
-  } else {
-    emitFrameAdjust(SP, MBB, MBBI, StackSize);
+MachineBasicBlock::iterator SuperHFrameLowering::eliminateCallFramePseudoInstr(
+    MachineFunction &MF, MachineBasicBlock &MBB,
+    MachineBasicBlock::iterator I) const {
+  if (!hasReservedCallFrame(MF)) {
+    const SuperHInstrInfo &TII = *STI.getInstrInfo();
+    int64_t Amount = I->getOperand(0).getImm();
+    if (I->getOpcode() == SH::ADJCALLSTACKDOWN)
+      Amount = -Amount;
+    TII.adjustRegister(MBB, I, I->getDebugLoc(), SH::R15, Amount, Register());
   }
-
-  // Restore return address from stack (if needed.)
-  if (MFI.hasCalls()) {
-    BuildMI(MBB, MBBI, DL, TII.get(SH::LDSMPR))
-        .addReg(SP)
-        .setMIFlag(MachineInstr::FrameDestroy);
-  }
-
-  // Restore stack pointer
-  if (HasFP) {
-    BuildMI(MBB, MBBI, DL, TII.get(SH::MOVLP), FP)
-        .addReg(SP)
-        .setMIFlag(MachineInstr::FrameDestroy);
-  }
-
-  // TODO: Handle GOT
+  return MBB.erase(I);
 }
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//                                Callee-Saves
-//===--------------------------------------------------------------------------===//
 
 void SuperHFrameLowering::determineCalleeSaves(MachineFunction &MF,
                                                BitVector &SavedRegs,
                                                RegScavenger *RS) const {
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
+  if (hasFP(MF))
+    SavedRegs.set(SH::R14);
+}
+
+// Push order: R14, then R8 up to R13, then PR.
+static unsigned getPushRank(MCRegister Reg) {
+  switch (Reg) {
+  case SH::R14:
+    return 0;
+  case SH::R8:
+    return 1;
+  case SH::R9:
+    return 2;
+  case SH::R10:
+    return 3;
+  case SH::R11:
+    return 4;
+  case SH::R12:
+    return 5;
+  case SH::R13:
+    return 6;
+  case SH::PR:
+    return 7;
+  default:
+    llvm_unreachable("unexpected callee-saved register");
+  }
+}
+
+bool SuperHFrameLowering::assignCalleeSavedSpillSlots(
+    MachineFunction &MF, const TargetRegisterInfo *TRI,
+    std::vector<CalleeSavedInfo> &CSI) const {
+  llvm::sort(CSI, [](const CalleeSavedInfo &A, const CalleeSavedInfo &B) {
+    return getPushRank(A.getReg()) < getPushRank(B.getReg());
+  });
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  int64_t Offset = 0;
+  for (CalleeSavedInfo &Info : CSI) {
+    Offset -= 4;
+    Info.setFrameIdx(MFI.CreateFixedSpillStackObject(4, Offset));
+  }
+  MF.getInfo<SuperHMachineFunctionInfo>()->setCalleeSavedSize(-Offset);
+  return true;
 }
 
 bool SuperHFrameLowering::spillCalleeSavedRegisters(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
     ArrayRef<CalleeSavedInfo> CSI, const TargetRegisterInfo *TRI) const {
-
-  LLVM_DEBUG(dbgs() << "Spilling " << CSI.size() << " registers...\n");
-  if (CSI.empty()) {
-    return false;
-  }
-
+  const SuperHInstrInfo &TII = *STI.getInstrInfo();
   DebugLoc DL = MBB.findDebugLoc(MI);
-  MachineFunction &MF = *MBB.getParent();
-  const SuperHSubtarget &STI = MF.getSubtarget<SuperHSubtarget>();
-  const TargetInstrInfo &TII = *STI.getInstrInfo();
-  for (const CalleeSavedInfo &I : reverse(CSI)) {
-    TII.storeRegToStackSlot(MBB, MI, I.getReg(), true, I.getFrameIdx(),
-                            &SH::GPRRegClass, 0);
+  for (const CalleeSavedInfo &Info : CSI) {
+    MCRegister Reg = Info.getReg();
+    if (!MBB.isLiveIn(Reg))
+      MBB.addLiveIn(Reg);
+    if (Reg == SH::PR)
+      BuildMI(MBB, MI, DL, TII.get(SH::STPRP), SH::R15)
+          .addReg(SH::R15)
+          .setMIFlag(MachineInstr::FrameSetup);
+    else
+      BuildMI(MBB, MI, DL, TII.get(SH::STLP), SH::R15)
+          .addReg(Reg, RegState::Kill)
+          .addReg(SH::R15)
+          .setMIFlag(MachineInstr::FrameSetup);
   }
   return true;
 }
 
 bool SuperHFrameLowering::restoreCalleeSavedRegisters(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator II,
-    MutableArrayRef<CalleeSavedInfo> CSI, const TargetRegisterInfo *TRI) const {
-
-  LLVM_DEBUG(dbgs() << "Restoring " << CSI.size() << " registers...\n");
-  if (CSI.empty()) {
-    return false;
-  }
-
-  DebugLoc DL = MBB.findDebugLoc(II);
-  MachineFunction &MF = *MBB.getParent();
-  const SuperHSubtarget &STI = MF.getSubtarget<SuperHSubtarget>();
-  const TargetInstrInfo &TII = *STI.getInstrInfo();
-  for (const CalleeSavedInfo &I : CSI) {
-    TII.loadRegFromStackSlot(MBB, II, I.getReg(), I.getFrameIdx(),
-                             &SH::GPRRegClass, 0);
-  }
-
-  return true;
-}
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//                               Call-Frame Meta
-//===--------------------------------------------------------------------------===//
-
-MachineBasicBlock::iterator SuperHFrameLowering::eliminateCallFramePseudoInstr(
-    MachineFunction &MF, MachineBasicBlock &MBB,
-    MachineBasicBlock::iterator MI) const {
-  const SuperHSubtarget &STI = MF.getSubtarget<SuperHSubtarget>();
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+    MutableArrayRef<CalleeSavedInfo> CSI,
+    const TargetRegisterInfo *TRI) const {
   const SuperHInstrInfo &TII = *STI.getInstrInfo();
-
-  // If call frame is reserved, erase.
-  if (hasReservedCallFrame(MF)) {
-    return MBB.erase(MI);
+  DebugLoc DL = MBB.findDebugLoc(MI);
+  for (const CalleeSavedInfo &Info : llvm::reverse(CSI)) {
+    MCRegister Reg = Info.getReg();
+    if (Reg == SH::PR)
+      BuildMI(MBB, MI, DL, TII.get(SH::LDPRP), SH::R15)
+          .addReg(SH::R15)
+          .setMIFlag(MachineInstr::FrameDestroy);
+    else
+      BuildMI(MBB, MI, DL, TII.get(SH::LDLP), Reg)
+          .addReg(SH::R15, RegState::Define)
+          .addReg(SH::R15)
+          .setMIFlag(MachineInstr::FrameDestroy);
   }
-
-  // If frame size is 0, erase.
-  int Amount = TII.getFrameSize(*MI);
-  if (Amount == 0) {
-    return MBB.erase(MI);
-  }
-  return MBB.erase(MI);
-}
-
-bool SuperHFrameLowering::canSimplifyCallFramePseudos(
-    const MachineFunction &MF) const {
-
-  // Always simplify call frame pseudo instructions, even when
-  // hasReservedCallFrame is false.
   return true;
 }
 
-bool SuperHFrameLowering::hasFPImpl(const MachineFunction &MF) const {
+StackOffset
+SuperHFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
+                                            Register &FrameReg) const {
   const MachineFrameInfo &MFI = MF.getFrameInfo();
-  return MF.disableFramePointerElim() || MFI.hasVarSizedObjects() ||
-         MFI.isFrameAddressTaken();
+  FrameReg = hasFP(MF) ? SH::R14 : SH::R15;
+  return StackOffset::getFixed(MFI.getObjectOffset(FI) + MFI.getStackSize());
 }
 
-bool SuperHFrameLowering::hasReservedCallFrame(
-    const MachineFunction &MF) const {
-  const MachineFrameInfo &MFI = MF.getFrameInfo();
-  return hasFP(MF) && !MFI.hasVarSizedObjects();
+static int64_t getLocalSize(const MachineFunction &MF) {
+  return MF.getFrameInfo().getStackSize() -
+         MF.getInfo<SuperHMachineFunctionInfo>()->getCalleeSavedSize();
 }
 
+void SuperHFrameLowering::emitPrologue(MachineFunction &MF,
+                                       MachineBasicBlock &MBB) const {
+  const SuperHInstrInfo &TII = *STI.getInstrInfo();
+  MachineBasicBlock::iterator MBBI = MBB.begin();
+  while (MBBI != MBB.end() && MBBI->getFlag(MachineInstr::FrameSetup))
+    ++MBBI;
+  DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
 
+  // R1 holds nothing on entry under either convention.
+  TII.adjustRegister(MBB, MBBI, DL, SH::R15, -getLocalSize(MF), SH::R1,
+                     MachineInstr::FrameSetup);
 
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                         Frame Load-Store Fixup Pass
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-
-#undef DEBUG_TYPE
-#define DEBUG_TYPE "sh-frame-fixup"
-
-namespace llvm {
-
-// This pass serves to fix up frame loads and stores after subroutine jumps
-// to ensure that return values are not clobbered.
-struct SuperHFrameFixupPass : public MachineFunctionPass {
-private:
-  const SuperHSubtarget *STI;
-
-public:
-  static char ID;
-  typedef MachineBasicBlock::iterator BlockIt;
-  typedef MachineBasicBlock &Block;
-
-  SuperHFrameFixupPass() : MachineFunctionPass(ID) {}
-
-  // Fixes up JSR instructions so that their return values don't
-  // get clobbered by the implicit uses of R0 and R1 done by stack
-  // loads.
-  bool fixupJSR(Block MBB, BlockIt MBII) {
-    LLVM_DEBUG(dbgs() << " - Fixing up JSR instruction...\n");
-    MachineInstr *MP = &*std::next(MBII);
-    int Moved = 0;
-
-    BlockIt II = std::next(MBII), E = MBB.end();
-    while (II != E) {
-      BlockIt NII = std::next(II);
-
-      switch (II->getOpcode()) {
-      case SH::MOVBLF:
-      case SH::MOVWLF:
-      case SH::MOVLLF:
-      case SH::MOVBLP:
-      case SH::MOVWLP:
-      case SH::MOVLLP:
-      case SH::ADJCALLSTACKUP:
-      case SH::NOP: {
-        break;
-      }
-      case SH::COPY: {
-        if (II->readsRegister(SH::R0, nullptr) ||
-            II->readsRegister(SH::R1, nullptr)) {
-          II->moveBefore(MP);
-          Moved++;
-        }
-        break;
-      }
-      default:
-
-        // We've reached a barrier where moving instructions up could be
-        // dangerous. as such, end the MBB pass here.
-        NII = E;
-        break;
-      }
-
-      II = NII;
-    }
-
-    LLVM_DEBUG(dbgs() << " - Moved " << Moved << " instructions in BB.\n");
-    return Moved > 0;
-  }
-
-  bool runOnBasicBlock(Block &MBB) {
-    BlockIt II = MBB.begin(), E = MBB.end();
-    while (II != E) {
-      switch (II->getOpcode()) {
-      default:
-        break;
-      case SH::JSR:
-        return fixupJSR(MBB, II);
-      }
-      II = std::next(II);
-    }
-    return false;
-  }
-
-  bool runOnMachineFunction(MachineFunction &MF) override {
-    LLVM_DEBUG(dbgs() << "\n********** SuperHFrameFixupPass **********\n");
-    LLVM_DEBUG(dbgs() << "Fixing up " << MF.getName() << "...\n");
-
-    STI = &MF.getSubtarget<SuperHSubtarget>();
-
-    int Modified = 0;
-    for (Block &BB : MF) {
-      Modified += runOnBasicBlock(BB);
-    }
-    LLVM_DEBUG(dbgs() << "Modified " << Modified << " BBs in " << MF.getName()
-                      << "...\n\n");
-    return Modified > 0;
-  }
-
-  StringRef getPassName() const override {
-    return "SuperH frame load/store fixup pass";
-  }
-};
-
-char SuperHFrameFixupPass::ID = 0;
-
-/// Creates instance of the frame analyzer pass.
-FunctionPass *createSuperHFrameFixupPass() {
-  return new SuperHFrameFixupPass();
+  if (hasFP(MF))
+    BuildMI(MBB, MBBI, DL, TII.get(SH::MOV), SH::R14)
+        .addReg(SH::R15)
+        .setMIFlag(MachineInstr::FrameSetup);
 }
 
-} // namespace llvm
+void SuperHFrameLowering::emitEpilogue(MachineFunction &MF,
+                                       MachineBasicBlock &MBB) const {
+  const SuperHInstrInfo &TII = *STI.getInstrInfo();
+  MachineBasicBlock::iterator MBBI = MBB.getFirstTerminator();
+  DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
+  while (MBBI != MBB.begin() &&
+         std::prev(MBBI)->getFlag(MachineInstr::FrameDestroy))
+    --MBBI;
+
+  // A scratch register for large frames: a temporary the return doesn't use.
+  Register Scratch;
+  MachineBasicBlock::iterator Terminator = MBB.getFirstTerminator();
+  for (MCRegister Candidate : {SH::R1, SH::R2, SH::R3}) {
+    if (Terminator == MBB.end() ||
+        !Terminator->readsRegister(Candidate, /*TRI=*/nullptr)) {
+      Scratch = Candidate;
+      break;
+    }
+  }
+
+  if (hasFP(MF))
+    BuildMI(MBB, MBBI, DL, TII.get(SH::MOV), SH::R15)
+        .addReg(SH::R14)
+        .setMIFlag(MachineInstr::FrameDestroy);
+  TII.adjustRegister(MBB, MBBI, DL, SH::R15, getLocalSize(MF), Scratch,
+                     MachineInstr::FrameDestroy);
+}

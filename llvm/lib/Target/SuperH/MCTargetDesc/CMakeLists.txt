@@ -10,7 +10,6 @@ add_llvm_component_library(LLVMSuperHDesc
   LINK_COMPONENTS
   MC
   SuperHInfo
-  SuperHCodeGen
   Support
   TargetParser
 

@@ -4,26 +4,36 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-//===-----------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // This file defines the interfaces that SuperH uses to lower LLVM code into a
 // selection DAG.
 //
-//===-----------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 #ifndef LLVM_LIB_TARGET_SUPERH_SUPERHISELLOWERING_H
 #define LLVM_LIB_TARGET_SUPERH_SUPERHISELLOWERING_H
 
 #include "SuperH.h"
-#include "SuperHInstrInfo.h"
-#include "llvm/CodeGen/MachineConstantPool.h"
+#include "SuperHSelectionDAGInfo.h"
+#include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetLowering.h"
-#include "llvm/IR/GlobalValue.h"
 
 namespace llvm {
 class SuperHSubtarget;
-class MachineConstantPool;
+
+/// Assigns argument locations for the SuperH calling conventions. Arguments
+/// are laid out as a memory image of 32-bit words; the first four words go in
+/// R4-R7. Under the Windows CE convention every word, including those in
+/// registers, has a stack offset: the caller reserves the first 16 bytes as a
+/// home area for R4-R7.
+bool CC_SuperH(unsigned ValNo, MVT ValVT, MVT LocVT,
+               CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
+               Type *OrigTy, CCState &State);
+bool CC_SuperH_WinCE(unsigned ValNo, MVT ValVT, MVT LocVT,
+                     CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
+                     Type *OrigTy, CCState &State);
 
 class SuperHTargetLowering : public TargetLowering {
   const SuperHSubtarget *Subtarget;
@@ -31,79 +41,97 @@ class SuperHTargetLowering : public TargetLowering {
 public:
   SuperHTargetLowering(const TargetMachine &TM, const SuperHSubtarget &STI);
 
-  // Whether to use software floating point
   bool useSoftFloat() const override;
 
-  /// ReplaceNodeResults - Replace a node with an illegal result type
-  /// with a new node built out of custom code.
+  MVT getScalarShiftAmountTy(const DataLayout &, EVT) const override {
+    return MVT::i32;
+  }
+
+  EVT getSetCCResultType(const DataLayout &DL, LLVMContext &Context,
+                         EVT VT) const override {
+    return MVT::i32;
+  }
+
+  SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
+
   void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
                           SelectionDAG &DAG) const override;
 
-  // LowerToConstantPool - SuperH's compressed instruction set means that
-  // immediates and displacements can not be larger than 8 bits.
-  // As such we need to store said immediates and displacements within
-  // constants that are within range of the program counter.
-  //
-  // As such this function is a helper that:
-  //  1. Allocates a constant pool slot for the address
-  //  2. Inserts the target address into said slot.
-  //  3. Returns the neccesary, but non-legalized instruction sequence to fetch
-  //     the address from that constant pool slot.
-  template <class NodeTy>
-  SDValue LowerToConstantPool(NodeTy *N, SelectionDAG &DAG) const;
+  SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
   SDValue LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv,
                                bool IsVarArg,
                                const SmallVectorImpl<ISD::InputArg> &Ins,
-                               const SDLoc &dl, SelectionDAG &DAG,
+                               const SDLoc &DL, SelectionDAG &DAG,
                                SmallVectorImpl<SDValue> &InVals) const override;
-  SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
-                      const SmallVectorImpl<ISD::OutputArg> &Outs,
-                      const SmallVectorImpl<SDValue> &OutVals, const SDLoc &dl,
-                      SelectionDAG &DAG) const override;
+
+  SDValue LowerCall(CallLoweringInfo &CLI,
+                    SmallVectorImpl<SDValue> &InVals) const override;
+
   bool CanLowerReturn(CallingConv::ID CallConv, MachineFunction &MF,
-                      bool isVarArg,
+                      bool IsVarArg,
                       const SmallVectorImpl<ISD::OutputArg> &Outs,
                       LLVMContext &Context, const Type *RetTy) const override;
-  SDValue LowerCall(CallLoweringInfo & /*CLI*/,
-                    SmallVectorImpl<SDValue> & /*InVals*/) const override;
 
-  SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
+  SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
+                      const SmallVectorImpl<ISD::OutputArg> &Outs,
+                      const SmallVectorImpl<SDValue> &OutVals,
+                      const SDLoc &DL, SelectionDAG &DAG) const override;
 
-  // Lowerings
-  SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerExternalSymbol(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerConstant(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerDIV(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerMUL(SDValue Op, SelectionDAG &DAG) const;
+  bool isLegalAddressingMode(const DataLayout &DL, const AddrMode &AM,
+                             Type *Ty, unsigned AddrSpace,
+                             Instruction *I = nullptr) const override;
 
-  SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSETCC(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
-  SDValue getSHCmp(SDValue &LHS, SDValue &RHS, ISD::CondCode CC, SDValue &OutCC,
-                   SelectionDAG &DAG, SDLoc DL) const;
+  bool isLegalICmpImmediate(int64_t Imm) const override;
+  bool isLegalAddImmediate(int64_t Imm) const override;
 
-  // Inserters
+  bool isTruncateFree(Type *SrcTy, Type *DstTy) const override;
+  bool isTruncateFree(EVT SrcVT, EVT DstVT) const override;
+
   MachineBasicBlock *
   EmitInstrWithCustomInserter(MachineInstr &MI,
                               MachineBasicBlock *MBB) const override;
 
+  Register getRegisterByName(const char *RegName, LLT VT,
+                             const MachineFunction &MF) const override;
+
+  ConstraintType getConstraintType(StringRef Constraint) const override;
+  std::pair<unsigned, const TargetRegisterClass *>
+  getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
+                               StringRef Constraint, MVT VT) const override;
+
+  /// Size of the area the caller reserves for R4-R7 under the Windows CE
+  /// calling standard.
+  static constexpr unsigned WinCEHomeAreaSize = 16;
+
 private:
-  MachineBasicBlock *insertSELECTCC(MachineInstr &MI,
-                                    MachineBasicBlock *BB) const;
+  CCAssignFn *getArgumentAssignFn() const;
 
-  SDValue getPICJumpTableRelocBase(SDValue Table,
-                                   SelectionDAG &DAG) const override;
+  SDValue lowerAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerSETCC(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVASTART(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerCarryOp(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerMULLOHI(SDValue Op, SelectionDAG &DAG) const;
 
-  // Lowerings
-  SDValue LowerCallResult(SDValue Chain, SDValue InGlue,
-                          CallingConv::ID CallConv, bool isVarArg,
+  /// Emits a comparison of LHS and RHS that sets T. On return, Invert says
+  /// whether T holds the opposite of the condition.
+  SDValue emitCompare(SDValue LHS, SDValue RHS, ISD::CondCode CC,
+                      bool &Invert, const SDLoc &DL, SelectionDAG &DAG) const;
+
+  SDValue lowerCallResult(SDValue Chain, SDValue InGlue,
+                          CallingConv::ID CallConv, bool IsVarArg,
                           const SmallVectorImpl<ISD::InputArg> &Ins,
-                          const SDLoc &dl, SelectionDAG &DAG,
+                          const SDLoc &DL, SelectionDAG &DAG,
                           SmallVectorImpl<SDValue> &InVals) const;
+
+  MachineBasicBlock *emitSelect(MachineInstr &MI,
+                                MachineBasicBlock *MBB) const;
 };
 
 } // namespace llvm
 
-#endif
+#endif // LLVM_LIB_TARGET_SUPERH_SUPERHISELLOWERING_H

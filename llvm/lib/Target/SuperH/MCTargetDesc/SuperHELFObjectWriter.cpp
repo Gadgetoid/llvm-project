@@ -6,90 +6,57 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "MCTargetDesc/SuperHBaseInfo.h"
 #include "MCTargetDesc/SuperHFixupKinds.h"
 #include "MCTargetDesc/SuperHMCTargetDesc.h"
-#include "SuperHMCAsmInfo.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCELFObjectWriter.h"
-#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCFixup.h"
-#include "llvm/MC/MCObjectFileInfo.h"
-#include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCValue.h"
-#include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
 
-#define DEBUG_TYPE "sh-elf-objwriter"
+namespace {
 
-namespace llvm {
 class SuperHELFObjectWriter : public MCELFObjectTargetWriter {
 public:
   SuperHELFObjectWriter(uint8_t OSABI)
-      : MCELFObjectTargetWriter(false, OSABI, ELF::EM_SH,
-                                /*HasRelocationAddend*/ true) {}
-
-  ~SuperHELFObjectWriter() override = default;
+      : MCELFObjectTargetWriter(/*Is64Bit=*/false, OSABI, ELF::EM_SH,
+                                /*HasRelocationAddend=*/true) {}
 
 protected:
   unsigned getRelocType(const MCFixup &Fixup, const MCValue &Target,
                         bool IsPCRel) const override;
-
-  bool needsRelocateWithSymbol(const MCValue &Val,
-                               unsigned Type) const override;
+  bool needsRelocateWithSymbol(const MCValue &Value,
+                               unsigned Type) const override {
+    return false;
+  }
 };
-} // namespace llvm
+
+} // end anonymous namespace
 
 unsigned SuperHELFObjectWriter::getRelocType(const MCFixup &Fixup,
                                              const MCValue &Target,
                                              bool IsPCRel) const {
-  auto Spec = Target.getSpecifier();
-  switch ((unsigned)Fixup.getKind()) {
-  case FK_Data_1:
-  case FK_Data_2:
-  case FK_Data_8:
-    return ELF::R_SH_NONE;
+  unsigned Kind = Fixup.getKind();
+  if (mc::isRelocation(Kind))
+    return Kind - FirstLiteralRelocationKind;
 
-  case FK_Data_4: {
-    switch (Spec) {
-    case SH::S_None:
-      return ELF::R_SH_DIR32;
-    case SH::S_PCREL:
-      return ELF::R_SH_REL32;
-    default:
-      return ELF::R_SH_NONE;
-    }
-  }
-
-  case SH::fixup_pcrel4_by2:
-  case SH::fixup_pcrel4_by4:
-  case SH::fixup_pcrel8_by4:
-  case SH::fixup_pcrel8_4by2:
-  case SH::fixup_pcrel12_4by2: {
-    switch (Spec) {
-    case SH::S_None:
-      return ELF::R_SH_DIR32;
-    case SH::S_PCREL:
-      return ELF::R_SH_REL32;
-    default:
-      return ELF::R_SH_NONE;
-    }
-  }
-
-  case SH::fixup_32:
-    return ELF::R_SH_DIR32;
-
+  switch (Kind) {
+  case FK_Data_4:
+    return IsPCRel ? ELF::R_SH_REL32 : ELF::R_SH_DIR32;
+  case SH::fixup_sh_branch8:
+    return ELF::R_SH_DIR8WPN;
+  case SH::fixup_sh_branch12:
+    return ELF::R_SH_IND12W;
+  case SH::fixup_sh_pcrel8x2:
+    return ELF::R_SH_DIR8WPZ;
+  case SH::fixup_sh_pcrel8x4:
+    return ELF::R_SH_DIR8WPL;
   default:
-    llvm_unreachable("invalid fixup kind!");
+    reportError(Fixup.getLoc(), "unsupported relocation type");
+    return ELF::R_SH_NONE;
   }
-}
-
-bool SuperHELFObjectWriter::needsRelocateWithSymbol(const MCValue &Val,
-                                                    unsigned Type) const {
-
-  return false;
 }
 
 std::unique_ptr<MCObjectTargetWriter>

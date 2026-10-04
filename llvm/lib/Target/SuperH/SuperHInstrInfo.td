@@ -1,1624 +1,948 @@
-//===-- SuperHInstrInfo.td - Main SuperH Instruction Definition -*- tablegen -*-==//
+//===-- SuperHInstrInfo.td - SuperH Instruction Definitions -*- tablegen -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-//===--------------------------------------------------------------------------===//
-///
-/// \file
-/// This file describes the SuperH instruction set, defining the instructions
-/// and properties of the instructions which are needed for code generation,
-/// machine code emission, and analysis.
-///
-/// The instructions in this file in particular cover SH1-2.
-/// later version and extensions are in their respective files.
-///
-/// The subsystems are ordered after the instruction classification that
-/// The SuperH ISA manuals use.
-///
-/// See: https://www.shared-ptr.com/sh_insns.html
-/// See: https://saturnopensdk.github.io/
-///
-//===--------------------------------------------------------------------------===//
-
-//===--------------------------------------------------------------------------===//
-// Instruction Formats
-//===--------------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
+//
+// This file describes the SH-1, SH-2 and SH-3 integer instruction sets. The
+// instruction names follow the Renesas mnemonics. Register-to-memory moves
+// are named LD<size><mode> and ST<size><mode>, where size is B, W or L and
+// the mode is one of:
+//   (none)  @Rm
+//   D       @(disp,Rm)
+//   X       @(R0,Rm)
+//   P       @Rm+ (loads) or @-Rn (stores)
+//   G       @(disp,GBR)
+//   PC      @(disp,PC)
+//
+// The T bit lives in SR. Comparisons define SR and conditional branches,
+// MOVT, ADDC and friends read it. As with EFLAGS on X86, the DAG carries SR
+// as an i32 value and the patterns name the physical register.
+//
+//===----------------------------------------------------------------------===//
 
 include "SuperHInstrFormats.td"
 
-//===--------------------------------------------------------------------------===//
-// Instruction Patterns
-//===--------------------------------------------------------------------------===//
+// The register class of target-independent pointer operands.
+def sh_ptr_rc : RegClassByHwMode<[DefaultMode], [GPR]>;
 
-defvar SH = DefaultMode;
-def sh_ptr_rc : RegClassByHwMode<[SH], [GPR]>;
+//===----------------------------------------------------------------------===//
+// Type profiles and DAG nodes
+//===----------------------------------------------------------------------===//
 
-// Both cases can use the same decoder method, so avoid the dispatch
-// by hwmode by setting an explicit DecoderMethod
-def ptr_op : RegisterOperand<sh_ptr_rc> {
-  let DecoderMethod = "DecodeIntRegsRegisterClass";
-}
+def SDT_SHCallSeqStart : SDCallSeqStart<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>;
+def SDT_SHCallSeqEnd   : SDCallSeqEnd<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>;
+def SDT_SHCall         : SDTypeProfile<0, -1, [SDTCisVT<0, i32>]>;
+def SDT_SHWrapper      : SDTypeProfile<1, 1, [SDTCisSameAs<0, 1>,
+                                              SDTCisPtrTy<0>]>;
+def SDT_SHCmp          : SDTypeProfile<1, 2, [SDTCisVT<0, i32>,
+                                              SDTCisVT<1, i32>,
+                                              SDTCisVT<2, i32>]>;
+def SDT_SHCmpZ         : SDTypeProfile<1, 1, [SDTCisVT<0, i32>,
+                                              SDTCisVT<1, i32>]>;
+def SDT_SHFlag         : SDTypeProfile<1, 0, [SDTCisVT<0, i32>]>;
+def SDT_SHBranch       : SDTypeProfile<0, 2, [SDTCisVT<0, OtherVT>,
+                                              SDTCisVT<1, i32>]>;
+def SDT_SHMovT         : SDTypeProfile<1, 1, [SDTCisVT<0, i32>,
+                                              SDTCisVT<1, i32>]>;
+def SDT_SHSelect       : SDTypeProfile<1, 3, [SDTCisVT<0, i32>,
+                                              SDTCisSameAs<0, 1>,
+                                              SDTCisSameAs<0, 2>,
+                                              SDTCisVT<3, i32>]>;
+def SDT_SHCarryOp      : SDTypeProfile<2, 3, [SDTCisVT<0, i32>,
+                                              SDTCisVT<1, i32>,
+                                              SDTCisSameAs<0, 2>,
+                                              SDTCisSameAs<0, 3>,
+                                              SDTCisVT<4, i32>]>;
+def SDT_SHNegC         : SDTypeProfile<2, 2, [SDTCisVT<0, i32>,
+                                              SDTCisVT<1, i32>,
+                                              SDTCisSameAs<0, 2>,
+                                              SDTCisVT<3, i32>]>;
 
-//===--------------------------------------------------------------------------===//
-// SuperH Type Profiles
-//===--------------------------------------------------------------------------===//
+def SHcallseq_start : SDNode<"ISD::CALLSEQ_START", SDT_SHCallSeqStart,
+                             [SDNPHasChain, SDNPOutGlue]>;
+def SHcallseq_end   : SDNode<"ISD::CALLSEQ_END", SDT_SHCallSeqEnd,
+                             [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
+def SHcall          : SDNode<"SHISD::CALL", SDT_SHCall,
+                             [SDNPHasChain, SDNPOutGlue, SDNPOptInGlue,
+                              SDNPVariadic]>;
+def SHret           : SDNode<"SHISD::RET", SDTNone,
+                             [SDNPHasChain, SDNPOptInGlue, SDNPVariadic]>;
+def SHwrapper       : SDNode<"SHISD::WRAPPER", SDT_SHWrapper>;
 
-def SHSDT_CallSeqStart  : SDCallSeqStart<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>;
-def SHSDT_CallSeqEnd    : SDCallSeqEnd<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>;
-def SHSDT_Call          : SDTypeProfile<0, -1, [SDTCisVT<0, iPTR>]>;
-def SHSDT_PICAdd        : SDTypeProfile<1, 2, [SDTCisSameAs<0, 1>,
-                                          SDTCisPtrTy<1>, SDTCisVT<2, i32>]>;
-def SHSDT_Brcond        : SDTypeProfile<0, 2, [SDTCisVT<0, OtherVT>, SDTCisVT<1, i8>]>;
-def SHSDT_Cmp           : SDTypeProfile<0, 3, [SDTCisSameAs<0, 1>, SDTCisVT<2, i8>]>;
-def SHSDT_SelectCC      : SDTypeProfile<1, 3, 
-                          [SDTCisSameAs<0, 1>, SDTCisSameAs<1, 2>, SDTCisVT<3, i8>]>;
+def SHcmpeq  : SDNode<"SHISD::CMPEQ", SDT_SHCmp>;
+def SHcmphs  : SDNode<"SHISD::CMPHS", SDT_SHCmp>;
+def SHcmpge  : SDNode<"SHISD::CMPGE", SDT_SHCmp>;
+def SHcmphi  : SDNode<"SHISD::CMPHI", SDT_SHCmp>;
+def SHcmpgt  : SDNode<"SHISD::CMPGT", SDT_SHCmp>;
+def SHtst    : SDNode<"SHISD::TST", SDT_SHCmp>;
+def SHcmppz  : SDNode<"SHISD::CMPPZ", SDT_SHCmpZ>;
+def SHcmppl  : SDNode<"SHISD::CMPPL", SDT_SHCmpZ>;
+def SHclrt   : SDNode<"SHISD::CLRT", SDT_SHFlag>;
+def SHsett   : SDNode<"SHISD::SETT", SDT_SHFlag>;
 
-//===--------------------------------------------------------------------------===//
-// SuperH Specific Nodes
-//===--------------------------------------------------------------------------===//
+def SHbt     : SDNode<"SHISD::BT", SDT_SHBranch, [SDNPHasChain]>;
+def SHbf     : SDNode<"SHISD::BF", SDT_SHBranch, [SDNPHasChain]>;
+def SHmovt   : SDNode<"SHISD::MOVT", SDT_SHMovT>;
+def SHselect : SDNode<"SHISD::SELECT", SDT_SHSelect>;
 
-def SHCallSeqStart  : SDNode<"ISD::CALLSEQ_START", SHSDT_CallSeqStart,
-                            [SDNPHasChain, SDNPOutGlue]>;
-
-def SHCallSeqEnd    : SDNode<"ISD::CALLSEQ_END", SHSDT_CallSeqEnd,
-                            [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
-
-def SHCall          : SDNode<"SHISD::CALL", SHSDT_Call,
-                            [SDNPHasChain, SDNPOutGlue,
-                             SDNPOptInGlue, SDNPVariadic]>;
-
-def SHRetGlue       : SDNode<"SHISD::RET_GLUE", SDTNone,
-                            [SDNPHasChain, SDNPOptInGlue, 
-                             SDNPVariadic]>;
-
-def SHWrapper       : SDNode<"SHISD::WRAPPER", SDTIntUnaryOp>;
-def SHPICAdd        : SDNode<"SHISD::PIC_ADD", SHSDT_PICAdd>;
-
-// Conditional Branching and Comparison
-def SHselectcc      : SDNode<"SHISD::SELECT_CC", SHSDT_SelectCC, [SDNPInGlue]>;
-def SHbrcond        : SDNode<"SHISD::BRCOND", SHSDT_Brcond, [SDNPHasChain, SDNPInGlue]>;
-def SHcmp           : SDNode<"SHISD::CMP", SHSDT_Cmp, [SDNPOutGlue]>;
+def SHaddc   : SDNode<"SHISD::ADDC", SDT_SHCarryOp>;
+def SHsubc   : SDNode<"SHISD::SUBC", SDT_SHCarryOp>;
+def SHnegc   : SDNode<"SHISD::NEGC", SDT_SHNegC>;
 
 
-//===--------------------------------------------------------------------------===//
-// Operand Classes
-//===--------------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
+// Operands
+//===----------------------------------------------------------------------===//
 
-// Base Operand Class
-class SHOpClass<string name, 
-                list<AsmOperandClass> superClasses = []> : AsmOperandClass {
+class SHAsmOperand<string name> : AsmOperandClass {
   let Name = name;
-  let ParserMethod = "parseOperand";
-  let SuperClasses = superClasses;
-}
-
-// Immediates
-class SHImmClass<int width> : SHOpClass<"Imm" # width> {
-  let PredicateMethod = "isImm";
-  let ParserMethod = "parseImm";
   let RenderMethod = "addImmOperands";
 }
 
-// Displacements
-class SHDispClass<int width> : SHOpClass<"Disp" # width> {
-  let PredicateMethod = "isDisp";
-  let ParserMethod = "parseDisp";
-  let RenderMethod = "addDispOperands";
+def SImm8AsmOperand : SHAsmOperand<"SImm8"> {
+  let PredicateMethod = "isSImm<8>";
+}
+def UImm8AsmOperand : SHAsmOperand<"UImm8"> {
+  let PredicateMethod = "isUImm<8>";
 }
 
-// PC-Relative Addressing
-class SHPCRelClass : SHOpClass<"PCRel"> {
-  let PredicateMethod = "isPCRel";
-  let ParserMethod = "parsePCRel";
-  let RenderMethod = "addPCRelOperands";
-}
-
-// Register Indirect Ops
-class SHRegIndirectClass<string op> : SHOpClass<"IReg" # op> {
-  let PredicateMethod = "isIReg" # op;
-  let ParserMethod = "parseRegisterIndirect";
-  let RenderMethod = "addIRegOperands";
-}
-
-//===--------------------------------------------------------------------------===//
-// Operands
-//===--------------------------------------------------------------------------===//
-
-// Operand with Scaling
-class SHScaledOp<ValueType vt, string name, int scale, bit encode = 1>
-      : Operand<vt> {
-
-  defvar Scale = !cond(!gt(scale, 0) : "<" # scale # ">", true : "");
-  defvar Suffix = Scale;
-
-  let PrintMethod = "print" # name # Suffix;
-  let EncoderMethod = !cond(encode : "get" # name # "OpValue" # Suffix, true : "");
-}
-
-
-// Immediate
-class SHImmOp<int width, ValueType vt>
-      : Operand<vt>, ImmLeaf<vt, [{ return isInt<}] # width # [{>(Imm); }]> {
-  let ParserMatchClass = SHImmClass<width>;
-  let OperandType = "OPERAND_IMMEDIATE";
+def simm8 : Operand<i32>, ImmLeaf<i32, [{ return isInt<8>(Imm); }]> {
+  let ParserMatchClass = SImm8AsmOperand;
+  let DecoderMethod = "decodeSImm8";
   let PrintMethod = "printImm";
-  let MCOperandPredicate = [{
-    int64_t Imm;
-    if (MCOp.evaluateAsConstantImm(Imm))
-      return isInt<}] # width # [{>(Imm)
-    return false;
-  }];
-}
-
-def imm8  : SHImmOp<8, i32>;
-
-// Displacement
-class SHDispOp<int width, ValueType vt, int scale = 0>
-      : SHScaledOp<vt, "Disp", scale>, 
-        PatLeaf<(imm), [{ return isUInt<}] # width # [{>(N->getZExtValue()); }]> {
-  let ParserMatchClass = SHDispClass<width>;
+  let EncoderMethod = "getImm8OpValue";
   let OperandType = "OPERAND_IMMEDIATE";
-  let MCOperandPredicate = [{
-      int64_t Imm;
-      if (MCOp.evaluateAsConstantImm(Imm))
-          return isUInt<#width>(Imm);
-      return MCOp.isBareSymbolRef();
-  }];
 }
 
-// Displacement
-def disp4     : SHDispOp<4,  i4,  1>;
-def disp4x2   : SHDispOp<4,  i4,  2>;
-def disp4x4   : SHDispOp<4,  i4,  4>;
-def disp8     : SHDispOp<8,  i8,  1>;
-def disp8x2   : SHDispOp<8,  i8,  2>;
-def disp8x4   : SHDispOp<8,  i8,  4>;
-def disp12    : SHDispOp<12, i16, 1>;
-
-// Memory Operand
-class SHMemriOp<RegisterClass rc, Operand dt, int scale = 0>
-      : SHScaledOp<iPTR, "Memri", scale, 0>,
-        PatLeaf<(imm), [{ return isUInt<32>(N->getSExtValue()); }]>  {
-  let OperandType = "OPERAND_MEMORY";
-  let MIOperandInfo = (ops rc, dt);
+def uimm8 : Operand<i32>, ImmLeaf<i32, [{ return isUInt<8>(Imm); }]> {
+  let ParserMatchClass = UImm8AsmOperand;
+  let PrintMethod = "printImm";
+  let EncoderMethod = "getImm8OpValue";
+  let OperandType = "OPERAND_IMMEDIATE";
 }
 
-def memri     : SHMemriOp<GPR, i32imm,  1>;
-def memri4    : SHMemriOp<GPR, disp4,   1>;
-def memri4x2  : SHMemriOp<GPR, disp4x2, 2>;
-def memri4x4  : SHMemriOp<GPR, disp4x4, 4>;
-def memri8x2  : SHMemriOp<GPR, disp8,   2>;
-def memri8x4  : SHMemriOp<GPR, disp8,   4>;
+// Displacements are held as byte offsets and scaled when encoded.
+class SHDispAsmOperand<int width, int scale>
+    : SHAsmOperand<"Disp" # width # "x" # scale> {
+  let PredicateMethod = "isDisp<" # width # ", " # scale # ">";
+}
 
-// PCRel Operand
-class SHPCRelOp<ValueType vt, int scale = 0>
-      : SHScaledOp<vt, "PCRel", scale>,
-        PatLeaf<(imm), [{ return isUInt<}] # width # [{>(N->getZExtValue()); }]>  {
+class SHDisp<int width, int scale> : Operand<i32> {
+  let ParserMatchClass = SHDispAsmOperand<width, scale>;
+  let PrintMethod = "printDisp";
+  let EncoderMethod = "getDispOpValue<" # scale # ">";
+  let DecoderMethod = "decodeDisp<" # scale # ">";
+  let OperandType = "OPERAND_IMMEDIATE";
+}
+
+def disp4x1 : SHDisp<4, 1>;
+def disp4x2 : SHDisp<4, 2>;
+def disp4x4 : SHDisp<4, 4>;
+def disp8x1 : SHDisp<8, 1>;
+def disp8x2 : SHDisp<8, 2>;
+def disp8x4 : SHDisp<8, 4>;
+
+def BrTarget8AsmOperand : SHAsmOperand<"BrTarget8"> {
+  let PredicateMethod = "isBranchTarget";
+}
+def BrTarget12AsmOperand : SHAsmOperand<"BrTarget12"> {
+  let PredicateMethod = "isBranchTarget";
+}
+def PCRelAsmOperand : SHAsmOperand<"PCRel"> {
+  let PredicateMethod = "isBranchTarget";
+}
+
+def brtarget8 : Operand<OtherVT> {
+  let ParserMatchClass = BrTarget8AsmOperand;
+  let PrintMethod = "printBranchTarget";
+  let DecoderMethod = "decodeBranch<8>";
+  let EncoderMethod = "getBranch8OpValue";
   let OperandType = "OPERAND_PCREL";
 }
 
-def pcrel8   : SHPCRelOp<i8>;
-def pcrel8x2 : SHPCRelOp<i8, 2>;
-def pcrel8x4 : SHPCRelOp<i8, 4>;
-def pcrel12  : SHPCRelOp<i16>;
-
-// Branch Targets
-def brtarget       : Operand<OtherVT> {
-  let ParserMatchClass = SHPCRelClass<>;
-  let EncoderMethod = "getBranchTargetOpValue";
-  let DecoderMethod = "DecodeBranchTarget";
-  let PrintMethod = "printPCRel<1>";
+def brtarget12 : Operand<OtherVT> {
+  let ParserMatchClass = BrTarget12AsmOperand;
+  let PrintMethod = "printBranchTarget";
+  let DecoderMethod = "decodeBranch<12>";
+  let EncoderMethod = "getBranch12OpValue";
   let OperandType = "OPERAND_PCREL";
 }
 
-// An operand for the CONSTPOOL_ENTRY pseudo-instruction.
-// Double-indirect memory operand.
-def memrii : Operand<i32> {
-  let OperandType = "OPERAND_MEMORY";
-  let PrintMethod = "printMemrii";
+// The target of a PC-relative literal load or mova.
+class SHPCRel<string encoder, int scale> : Operand<i32> {
+  let ParserMatchClass = PCRelAsmOperand;
+  let PrintMethod = "printPCRelLoad<" # scale # ">";
+  let EncoderMethod = encoder;
+  let DecoderMethod = "decodeDisp<" # scale # ">";
+  let OperandType = "OPERAND_PCREL";
+}
+def pcrel8x2 : SHPCRel<"getPCRel8x2OpValue", 2>;
+def pcrel8x4 : SHPCRel<"getPCRel8x4OpValue", 4>;
+
+// A 32-bit literal: an immediate, symbol or symbol plus offset.
+def literal32 : Operand<i32> {
+  let PrintMethod = "printOperand";
 }
 
-// Register Indirect
-class SHIndirectRegOp<RegisterClass regClass, string op> 
-      : RegisterOperand<regClass> {
-    let ParserMatchClass = SHRegIndirectClass<op>;
-    let OperandType = "OPERAND_MEMORY";
-    let PrintMethod = "printIReg" # op;
-}
-def IGPR    : SHIndirectRegOp<GPR, "">;
-def IGPRInc : SHIndirectRegOp<GPR, "Inc">;
-def IGPRDec : SHIndirectRegOp<GPR, "Dec">;
-
-let WantsRoot = true in {
-
-// Addressing mode pattern reg+disp
-def addr : ComplexPattern<iPTR, 2, "SelectAddr">;
-
-// Addressing mode pattern reg+disp (Frame)
-def fraddr : ComplexPattern<iPTR, 2, "SelectFrAddr">;
-
-// Immediate lowering.
-def anyimm8 : ComplexPattern<i8, 1, "SelectImm", [imm]>;
-def anyimm16 : ComplexPattern<i16, 1, "SelectImm", [imm]>;
-def anyimm32 : ComplexPattern<i32, 1, "SelectImm", [imm]>;
-def anyimmf32 : ComplexPattern<f32, 1, "SelectImm", [imm]>;
+// Memory operand of the frame index pseudos: a frame index and an offset.
+def frameaddr : Operand<iPTR> {
+  let MIOperandInfo = (ops GPR, i32imm);
+  let PrintMethod = "printOperand";
 }
 
+//===----------------------------------------------------------------------===//
+// Complex patterns
+//===----------------------------------------------------------------------===//
 
+// Register plus scaled 4-bit displacement.
+def AddrDisp1 : ComplexPattern<iPTR, 2, "selectAddrDisp<1>", [], []>;
+def AddrDisp2 : ComplexPattern<iPTR, 2, "selectAddrDisp<2>", [], []>;
+def AddrDisp4 : ComplexPattern<iPTR, 2, "selectAddrDisp<4>", [], []>;
+// R0 plus register.
+def AddrIndex : ComplexPattern<iPTR, 2, "selectAddrIndex", [], []>;
+// Frame index plus offset.
+def AddrFrame : ComplexPattern<iPTR, 2, "selectAddrFrame", [frameindex], []>;
 
+//===----------------------------------------------------------------------===//
+// Immediate leaves
+//===----------------------------------------------------------------------===//
 
-//===--------------------------------------------------------------------------===//
-// Condition Codes
-//===--------------------------------------------------------------------------===//
-// NOTE:  To assist codegen, condition codes are created 
-//        for pseudo instructions.
-//===--------------------------------------------------------------------------===//
+def imm_uimm8 : ImmLeaf<i32, [{ return isUInt<8>(Imm); }]>;
+def imm_ff    : ImmLeaf<i32, [{ return Imm == 0xff; }]>;
+def imm_ffff  : ImmLeaf<i32, [{ return Imm == 0xffff; }]>;
+def imm_ext8  : ImmLeaf<i32, [{ return Imm >= 128 && Imm <= 255; }]>;
+def imm_ext16 : ImmLeaf<i32, [{
+  return Imm >= 0x8000 && Imm <= 0xffff && (Imm & 0xff80) == 0xff80;
+}]>;
 
-def SH_COND_EQ : PatLeaf<(i8 0)>;
-def SH_COND_GT : PatLeaf<(i8 1)>;
-def SH_COND_GE : PatLeaf<(i8 2)>;
-def SH_COND_HI : PatLeaf<(i8 3)>;
-def SH_COND_HS : PatLeaf<(i8 4)>;
-def SH_COND_PL : PatLeaf<(i8 5)>;
-def SH_COND_PZ : PatLeaf<(i8 6)>;
+def NegImm8 : SDNodeXForm<imm, [{
+  return CurDAG->getSignedTargetConstant(N->getSExtValue() - 256, SDLoc(N),
+                                         MVT::i32);
+}]>;
+def NegImm16 : SDNodeXForm<imm, [{
+  return CurDAG->getSignedTargetConstant(N->getSExtValue() - 65536, SDLoc(N),
+                                         MVT::i32);
+}]>;
 
+//===----------------------------------------------------------------------===//
+// Data transfer
+//===----------------------------------------------------------------------===//
 
+let hasSideEffects = 0 in {
+let isMoveReg = 1, isAsCheapAsAMove = 1 in
+def MOV   : FNM<0b0110, 0b0011, (outs GPR:$Rn), (ins GPR:$Rm),
+                "mov\t$Rm, $Rn">;
 
+let isReMaterializable = 1, isAsCheapAsAMove = 1, isMoveImm = 1 in
+def MOVI  : FNI8<0b1110, (outs GPR:$Rn), (ins simm8:$imm),
+                 "mov\t$imm, $Rn", [(set i32:$Rn, simm8:$imm)]>;
 
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                          Data Transfer Instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-// NOTE:  The names of the instructions are taken from the SH manual's
-//        Pseudocode examples for each instruction.
-//        When adding new instructions, please keep this naming scheme.
-//===--------------------------------------------------------------------------===//
-
-// mov Rm, Rn
-let hasSideEffects = 0 in
-def MOV           : InstRmRn<0b0110000000000011,
-                            (outs GPR:$Rn), (ins GPR:$Rm),
-                            "mov $Rm,$Rn",
-                            []>;
-
-// mov #imm:8, Rn
-let hasSideEffects = 0 in 
-def MOVI          : InstRnI8<0b1110000000000000,
-                            (outs GPR:$Rn), (ins imm8:$imm),
-                            "mov $imm,$Rn",
-                            []>;
-
-// mova @(disp, PC), R0
-let hasSideEffects = 0, mayLoad = 1, Uses = [PC], Defs = [R0], isDelayIllegal = 1 in
-def MOVA          : InstD8<0b1100011100000000,
-                          (outs), (ins pcrel8x4:$disp),
-                          "mova $disp,r0",
-                          []>;
-
-// mov.w @(disp,PC), Rn 
-let hasSideEffects = 0, mayLoad = 1, Uses = [PC], isDelayIllegal = 1 in
-def MOVWI         : InstRnD8<0b1001000000000000,
-                            (outs GPR:$Rn), (ins pcrel8x2:$disp),
-                            "mov.w $disp,$Rn",
-                            [(set i32:$Rn, (sextloadi16 constpool:$disp))]>;
-
-// mov.l @(disp,PC), Rn 
-let hasSideEffects = 0, mayLoad = 1, Uses = [PC], isDelayIllegal = 1 in
-def MOVLI         : InstRnD8<0b1101000000000000,
-                            (outs GPR:$Rn), (ins pcrel8x4:$disp),
-                            "mov.l $disp,$Rn",
-                            [(set i32:$Rn, (load constpool:$disp))]>;
-
-// movt Rn
-def MOVT          : InstRn<0b0000000000101001,
-                            (outs GPR:$Rn), (ins),
-                            "movt $Rn",
-                            []>;
-
-// swap.b Rm,Rn
-def SWAPB         : InstRmRn<0b0110000000001000,
-                            (outs GPR:$Rn), (ins GPR:$Rm),
-                            "swap.b $Rm,$Rn",
-                            []>;
-
-// swap.w Rm,Rn
-def SWAPW         : InstRmRn<0b0110000000001001,
-                            (outs GPR:$Rn), (ins GPR:$Rm),
-                            "swap.w $Rm,$Rn",
-                            []>;
-
-// xtrct Rm,Rn
-def XTRCT         : InstRmRn<0b0010000000001101,
-                            (outs GPR:$Rn), (ins GPR:$Rm),
-                            "xtrct $Rm,$Rn",
-                            []>;
-
-//===--------------------------------------------------------------------------===//
-// Load Instructions
-//===--------------------------------------------------------------------------===//
-
-// Indirect Memory -> Register Load
-let hasSideEffects = 0, mayLoad = 1, isReMaterializable = 1 in {
-
-  // mov.b @Rm, Rn
-  def MOVBL             : InstRmRn<0b0110000000000000,
-                                  (outs GPR:$Rn), (ins IGPR:$Rm),
-                                  "mov.b $Rm,$Rn",
-                                  []>;
-
-  // mov.w @Rm, Rn
-  def MOVWL             : InstRmRn<0b0110000000000001,
-                                  (outs GPR:$Rn), (ins IGPR:$Rm),
-                                  "mov.w $Rm,$Rn",
-                                  []>;
-
-  // mov.l @Rm, Rn
-  def MOVLL             : InstRmRn<0b0110000000000010,
-                                  (outs GPR:$Rn), (ins IGPR:$Rm),
-                                  "mov.l $Rm,$Rn",
-                                  []>;
-
-  // mov.b @Rm+, Rn
-  let isDelayIllegal = 1 in
-  def MOVBP             : InstRmRn<0b0110000000000100,
-                                  (outs GPR:$Rn), (ins IGPRInc:$Rm),
-                                  "mov.b $Rm,$Rn",
-                                  []>;
-
-  // mov.w @Rm+, Rn
-  let isDelayIllegal = 1 in
-  def MOVWP             : InstRmRn<0b0110000000000101,
-                                  (outs GPR:$Rn), (ins IGPRInc:$Rm),
-                                  "mov.w $Rm,$Rn",
-                                  []>;
-
-  // mov.l @Rm+, Rn
-  let isDelayIllegal = 1 in
-  def MOVLP             : InstRmRn<0b0110000000000110,
-                                  (outs GPR:$Rn), (ins IGPRInc:$Rm),
-                                  "mov.l $Rm,$Rn",
-                                  []>;
-
-  // mov.b @(disp, Rm), R0
-  let Defs = [R0] in
-  def MOVBL4            : InstRmD4<0b1000010000000000,
-                                  (outs), (ins (memri4 $Rm, $disp):$src),
-                                  "mov.b $src,R0",
-                                  []>;
-  
-  // mov.w @(disp, Rm), R0
-  let Defs = [R0] in
-  def MOVWL4            : InstRmD4<0b1000010100000000,
-                                  (outs), (ins (memri4x2 $Rm, $disp):$src),
-                                  "mov.w $src,R0",
-                                  []>;
-  
-  // mov.l @(disp, Rm), Rn
-  def MOVLL4          : InstRmRnD4<0b0101000000000000,
-                                  (outs GPR:$Rn), (ins (memri4x4 $Rm, $disp):$src),
-                                  "mov.l $src,$Rn",
-                                  []>;
-
-  // mov.b @(R0,Rm),Rn
-  let Uses = [R0] in
-  def MOVBL0            : InstRmRn<0b0000000000001100,
-                                  (outs GPR:$Rn), (ins GPR:$Rm),
-                                  "mov.b @(R0,Rm),Rn",
-                                  []>;
-  
-  // mov.w @(R0,Rm),Rn
-  let Uses = [R0] in
-  def MOVWL0            : InstRmRn<0b0000000000001101,
-                                  (outs GPR:$Rn), (ins GPR:$Rm),
-                                  "mov.w @(R0,$Rm),$Rn",
-                                  []>;
-  
-  // mov.l @(R0,Rm),Rn
-  let Uses = [R0] in
-  def MOVLL0            : InstRmRn<0b0000000000001110,
-                                  (outs GPR:$Rn), (ins GPR:$Rm),
-                                  "mov.l @(R0,$Rm),$Rn",
-                                  []>;
-
-  // mov.b @(disp,GBR),R0
-  let Defs = [R0], Uses = [GBR] in
-  def MOVBLG              : InstD8<0b1100010000000000,
-                                  (outs), (ins disp12:$disp),
-                                  "mov.b @($disp,GBR),R0",
-                                  []>;
-  
-  // mov.w @(disp,GBR),R0
-  let Defs = [R0], Uses = [GBR] in
-  def MOVWLG              : InstD8<0b1100010100000000,
-                                  (outs), (ins disp12:$disp),
-                                  "mov.w @($disp,GBR),R0",
-                                  []>;
-  
-  // mov.l @(disp,GBR),R0
-  let Defs = [R0], Uses = [GBR] in
-  def MOVLLG              : InstD8<0b1100011000000000,
-                                  (outs), (ins disp12:$disp),
-                                  "mov.l @($disp,GBR),R0",
-                                  []>;
+let mayLoad = 1, isDelayIllegal = 1 in {
+def LDWPC : FND8<0b1001, (outs GPR:$Rn), (ins pcrel8x2:$disp),
+                 "mov.w\t$disp, $Rn">;
+def LDLPC : FND8<0b1101, (outs GPR:$Rn), (ins pcrel8x4:$disp),
+                 "mov.l\t$disp, $Rn">;
 }
 
+let isDelayIllegal = 1, Defs = [R0] in
+def MOVA  : FD8<0b11000111, (outs), (ins pcrel8x4:$disp),
+                "mova\t$disp, r0">;
 
+let Uses = [SR] in
+def MOVT  : FN<0b0000, 0b00101001, (outs GPR:$Rn), (ins),
+               "movt\t$Rn", [(set i32:$Rn, (SHmovt SR))]>;
 
-//===--------------------------------------------------------------------------===//
-// Store Instructions
-//===--------------------------------------------------------------------------===//
+def SWAPB : FNM<0b0110, 0b1000, (outs GPR:$Rn), (ins GPR:$Rm),
+                "swap.b\t$Rm, $Rn">;
+def SWAPW : FNM<0b0110, 0b1001, (outs GPR:$Rn), (ins GPR:$Rm),
+                "swap.w\t$Rm, $Rn", [(set i32:$Rn, (rotl i32:$Rm, (i32 16)))]>;
 
-// Register -> Indirect Memory Store
+let Constraints = "$src = $Rn" in
+def XTRCT : FNM<0b0010, 0b1101, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "xtrct\t$Rm, $Rn",
+                [(set i32:$Rn, (or (shl i32:$Rm, (i32 16)),
+                                   (srl i32:$src, (i32 16))))]>;
+}
+
+// Loads. Byte and word loads sign-extend.
+let hasSideEffects = 0, mayLoad = 1 in {
+def LDB   : FNM<0b0110, 0b0000, (outs GPR:$Rn), (ins GPR:$Rm),
+                "mov.b\t@$Rm, $Rn">;
+def LDW   : FNM<0b0110, 0b0001, (outs GPR:$Rn), (ins GPR:$Rm),
+                "mov.w\t@$Rm, $Rn">;
+def LDL   : FNM<0b0110, 0b0010, (outs GPR:$Rn), (ins GPR:$Rm),
+                "mov.l\t@$Rm, $Rn">;
+
+let isDelayIllegal = 0, Constraints = "$Rm = $Rm_wb" in {
+def LDBP  : FNM<0b0110, 0b0100, (outs GPR:$Rn, GPR:$Rm_wb), (ins GPR:$Rm),
+                "mov.b\t@${Rm}+, $Rn">;
+def LDWP  : FNM<0b0110, 0b0101, (outs GPR:$Rn, GPR:$Rm_wb), (ins GPR:$Rm),
+                "mov.w\t@${Rm}+, $Rn">;
+def LDLP  : FNM<0b0110, 0b0110, (outs GPR:$Rn, GPR:$Rm_wb), (ins GPR:$Rm),
+                "mov.l\t@${Rm}+, $Rn">;
+}
+
+def LDBD  : FMD4<0b10000100, (outs R0C:$dst), (ins GPR:$Rm, disp4x1:$disp),
+                 "mov.b\t@($disp, $Rm), $dst"> {
+  bits<0> dst;
+}
+def LDWD  : FMD4<0b10000101, (outs R0C:$dst), (ins GPR:$Rm, disp4x2:$disp),
+                 "mov.w\t@($disp, $Rm), $dst"> {
+  bits<0> dst;
+}
+def LDLD  : FNMD<0b0101, (outs GPR:$Rn), (ins GPR:$Rm, disp4x4:$disp),
+                 "mov.l\t@($disp, $Rm), $Rn">;
+
+def LDBX  : FNM<0b0000, 0b1100, (outs GPR:$Rn), (ins R0C:$idx, GPR:$Rm),
+                "mov.b\t@($idx, $Rm), $Rn"> {
+  bits<0> idx;
+}
+def LDWX  : FNM<0b0000, 0b1101, (outs GPR:$Rn), (ins R0C:$idx, GPR:$Rm),
+                "mov.w\t@($idx, $Rm), $Rn"> {
+  bits<0> idx;
+}
+def LDLX  : FNM<0b0000, 0b1110, (outs GPR:$Rn), (ins R0C:$idx, GPR:$Rm),
+                "mov.l\t@($idx, $Rm), $Rn"> {
+  bits<0> idx;
+}
+
+let Uses = [GBR] in {
+def LDBG  : FD8<0b11000100, (outs R0C:$dst), (ins disp8x1:$disp),
+                "mov.b\t@($disp, gbr), $dst"> {
+  bits<0> dst;
+}
+def LDWG  : FD8<0b11000101, (outs R0C:$dst), (ins disp8x2:$disp),
+                "mov.w\t@($disp, gbr), $dst"> {
+  bits<0> dst;
+}
+def LDLG  : FD8<0b11000110, (outs R0C:$dst), (ins disp8x4:$disp),
+                "mov.l\t@($disp, gbr), $dst"> {
+  bits<0> dst;
+}
+}
+}
+
+// Stores.
 let hasSideEffects = 0, mayStore = 1 in {
+def STB   : FNM<0b0010, 0b0000, (outs), (ins GPR:$Rm, GPR:$Rn),
+                "mov.b\t$Rm, @$Rn">;
+def STW   : FNM<0b0010, 0b0001, (outs), (ins GPR:$Rm, GPR:$Rn),
+                "mov.w\t$Rm, @$Rn">;
+def STL   : FNM<0b0010, 0b0010, (outs), (ins GPR:$Rm, GPR:$Rn),
+                "mov.l\t$Rm, @$Rn">;
 
-  // mov.b Rm, @Rn
-  def MOVBS             : InstRmRn<0b0010000000000000,
-                                  (outs), (ins GPR:$Rm, IGPR:$Rn),
-                                  "mov.b $Rm,$Rn",
-                                  []>;
-
-  // mov.w Rm, @Rn
-  def MOVWS             : InstRmRn<0b0010000000000001,
-                                  (outs), (ins GPR:$Rm, IGPR:$Rn),
-                                  "mov.w $Rm,$Rn",
-                                  []>;
-
-  // mov.l Rm, @Rn
-  def MOVLS             : InstRmRn<0b0010000000000010,
-                                  (outs), (ins GPR:$Rm, IGPR:$Rn),
-                                  "mov.l $Rm,$Rn",
-                                  []>;
-
-  // mov.b Rm, @-Rn
-  let isDelayIllegal = 1 in
-  def MOVBM             : InstRmRn<0b0010000000000100,
-                                  (outs), (ins GPR:$Rm, IGPRDec:$Rn),
-                                  "mov.b $Rm,$Rn",
-                                  []>;
-
-  // mov.w Rm, @-Rn
-  let isDelayIllegal = 1 in
-  def MOVWM             : InstRmRn<0b0010000000000101,
-                                  (outs), (ins GPR:$Rm, IGPRDec:$Rn),
-                                  "mov.w $Rm,$Rn",
-                                  []>;
-
-  // mov.l Rm, @-Rn
-  let isDelayIllegal = 1 in
-  def MOVLM             : InstRmRn<0b0010000000000110,
-                                  (outs), (ins GPR:$Rm, IGPRDec:$Rn),
-                                  "mov.l $Rm,$Rn",
-                                  []>;
-  
-  // mov.b R0, @(disp, Rn)
-  let Uses = [R0] in
-  def MOVBS4            : InstRnD4<0b1000000000000000,
-                                  (outs), (ins (memri4 $Rn, $disp):$dst),
-                                  "mov.b r0,$dst",
-                                  []>;
-  
-  // mov.w R0, @(disp, Rn)
-  let Uses = [R0] in
-  def MOVWS4            : InstRnD4<0b1000000100000000,
-                                  (outs), (ins (memri4x2 $Rn, $disp):$dst),
-                                  "mov.w r0,$dst",
-                                  []>;
-  
-  // mov.l Rm, @(disp, Rn)
-  def MOVLS4          : InstRmRnD4<0b0001000000000000,
-                                  (outs), (ins GPR:$Rm, (memri4x4 $Rn, $disp):$dst),
-                                  "mov.l $Rm,$dst",
-                                  []>;
-
-  // mov.b Rm,@(R0,Rn)
-  let Uses = [R0] in
-  def MOVBS0            : InstRmRn<0b0000000000000100,
-                                  (outs), (ins GPR:$Rm, GPR:$Rn),
-                                  "mov.b $Rm,@(R0,$Rn)",
-                                  []>;
-  
-  // mov.w Rm,@(R0,Rn)
-  let Uses = [R0] in
-  def MOVWS0            : InstRmRn<0b0000000000000101,
-                                  (outs), (ins GPR:$Rm, GPR:$Rn),
-                                  "mov.w $Rm,@(R0,$Rn)",
-                                  []>;
-  
-  // mov.l Rm,@(R0,Rn)
-  let Uses = [R0] in
-  def MOVLS0            : InstRmRn<0b0000000000000110,
-                                  (outs), (ins GPR:$Rm, GPR:$Rn),
-                                  "mov.l $Rm,@(R0,$Rn)",
-                                  []>;
-
-  // mov.b R0,@(disp,GBR)
-  let Uses = [R0, GBR] in
-  def MOVBSG              : InstD8<0b1100000000000000,
-                                  (outs), (ins disp12:$disp),
-                                  "mov.b R0,@($disp,GBR)",
-                                  []>;
-  
-  // mov.w R0,@(disp,GBR)
-  let Uses = [R0, GBR] in
-  def MOVWSG              : InstD8<0b1100000100000000,
-                                  (outs), (ins disp12:$disp),
-                                  "mov.w R0,@($disp,GBR)",
-                                  []>;
-  
-  // mov.l R0,@(disp,GBR)
-  let Uses = [R0, GBR] in
-  def MOVLSG              : InstD8<0b1100001000000000,
-                                  (outs), (ins disp12:$disp),
-                                  "mov.l R0,@($disp,GBR)",
-                                  []>;
+let Constraints = "$Rn = $Rn_wb" in {
+def STBP  : FNM<0b0010, 0b0100, (outs GPR:$Rn_wb), (ins GPR:$Rm, GPR:$Rn),
+                "mov.b\t$Rm, @-$Rn">;
+def STWP  : FNM<0b0010, 0b0101, (outs GPR:$Rn_wb), (ins GPR:$Rm, GPR:$Rn),
+                "mov.w\t$Rm, @-$Rn">;
+def STLP  : FNM<0b0010, 0b0110, (outs GPR:$Rn_wb), (ins GPR:$Rm, GPR:$Rn),
+                "mov.l\t$Rm, @-$Rn">;
 }
 
+def STBD  : FND4<0b10000000, (outs), (ins R0C:$src, GPR:$Rn, disp4x1:$disp),
+                 "mov.b\t$src, @($disp, $Rn)"> {
+  bits<0> src;
+}
+def STWD  : FND4<0b10000001, (outs), (ins R0C:$src, GPR:$Rn, disp4x2:$disp),
+                 "mov.w\t$src, @($disp, $Rn)"> {
+  bits<0> src;
+}
+def STLD  : FNMD<0b0001, (outs), (ins GPR:$Rm, GPR:$Rn, disp4x4:$disp),
+                 "mov.l\t$Rm, @($disp, $Rn)">;
 
+def STBX  : FNM<0b0000, 0b0100, (outs), (ins GPR:$Rm, R0C:$idx, GPR:$Rn),
+                "mov.b\t$Rm, @($idx, $Rn)"> {
+  bits<0> idx;
+}
+def STWX  : FNM<0b0000, 0b0101, (outs), (ins GPR:$Rm, R0C:$idx, GPR:$Rn),
+                "mov.w\t$Rm, @($idx, $Rn)"> {
+  bits<0> idx;
+}
+def STLX  : FNM<0b0000, 0b0110, (outs), (ins GPR:$Rm, R0C:$idx, GPR:$Rn),
+                "mov.l\t$Rm, @($idx, $Rn)"> {
+  bits<0> idx;
+}
 
+let Uses = [GBR] in {
+def STBG  : FD8<0b11000000, (outs), (ins R0C:$src, disp8x1:$disp),
+                "mov.b\t$src, @($disp, gbr)"> {
+  bits<0> src;
+}
+def STWG  : FD8<0b11000001, (outs), (ins R0C:$src, disp8x2:$disp),
+                "mov.w\t$src, @($disp, gbr)"> {
+  bits<0> src;
+}
+def STLG  : FD8<0b11000010, (outs), (ins R0C:$src, disp8x4:$disp),
+                "mov.l\t$src, @($disp, gbr)"> {
+  bits<0> src;
+}
+}
+}
 
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                            Arithmetic Instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-
-
-
-//===--------------------------------------------------------------------------===//
-// Addition
-//===--------------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
+// Arithmetic
+//===----------------------------------------------------------------------===//
 
 let hasSideEffects = 0, Constraints = "$src = $Rn" in {
-  
-  // add Rm, Rn
-  def ADD           : InstRmRn<0b0011000000001100, 
-                              (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                              "add $Rm,$Rn",
-                              [(set i32:$Rn, (add i32:$Rm, i32:$src))]>;
-  
-  // add imm:8, Rn
-  def ADDI          : InstRnI8<0b0111000000000000, 
-                              (outs GPR:$Rn), (ins GPR:$src, imm8:$imm),
-                              "add $imm,$Rn",
-                              [(set i32:$Rn, (add i32:$src, imm:$imm))]>;
+let isCommutable = 1 in
+def ADD   : FNM<0b0011, 0b1100, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "add\t$Rm, $Rn", [(set i32:$Rn, (add i32:$src, i32:$Rm))]>;
+def ADDI  : FNI8<0b0111, (outs GPR:$Rn), (ins GPR:$src, simm8:$imm),
+                 "add\t$imm, $Rn",
+                 [(set i32:$Rn, (add i32:$src, simm8:$imm))]>;
+def SUB   : FNM<0b0011, 0b1000, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "sub\t$Rm, $Rn", [(set i32:$Rn, (sub i32:$src, i32:$Rm))]>;
 
-  // addc Rm, Rn
-  let Defs = [SR], Uses = [SR], isCommutable = 1 in
-  def ADDC          : InstRmRn<0b0011000000001110,
-                              (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                              "addc $Rm,$Rn",
-                              [(set i32:$Rn, (adde i32:$Rm, i32:$src))]>;
-  
-  // addv Rm, Rn
-  let Defs = [SR], isCommutable = 1 in
-  def ADDV          : InstRmRn<0b0011000000001111,
-                              (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                              "addv $Rm,$Rn",
-                              [(set i32:$Rn, (addc i32:$Rm, i32:$src))]>;
-
+let Uses = [SR], Defs = [SR] in {
+let isCommutable = 1 in
+def ADDC  : FNM<0b0011, 0b1110, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "addc\t$Rm, $Rn",
+                [(set i32:$Rn, SR, (SHaddc i32:$src, i32:$Rm, SR))]>;
+def SUBC  : FNM<0b0011, 0b1010, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "subc\t$Rm, $Rn",
+                [(set i32:$Rn, SR, (SHsubc i32:$src, i32:$Rm, SR))]>;
 }
 
-
-
-//===--------------------------------------------------------------------------===//
-// Subtraction
-//===--------------------------------------------------------------------------===//
-
-let hasSideEffects = 0, isCommutable = 1, Constraints = "$src = $Rn" in {
-
-  // sub Rm, Rn
-  def SUB           : InstRmRn<0b0011000000001000,
-                              (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                              "sub $Rm,$Rn",
-                              [(set i32:$Rn, (sub i32:$Rm, i32:$src))]>;
-
-  // subc Rm, Rn
-  let Defs = [SR], Uses = [SR] in
-  def SUBC          : InstRmRn<0b0011000000001010,
-                              (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                              "subc $Rm,$Rn",
-                              [(set i32:$Rn, (sube i32:$Rm, i32:$src))]>;
-
-  // subv Rm, Rn
-  let Defs = [SR] in
-  def SUBV          : InstRmRn<0b0011000000001011,
-                              (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                              "subv $Rm,$Rn",
-                              [(set i32:$Rn, (subc i32:$Rm, i32:$src))]>;
-  
-  // dt Rn
-  let Defs = [SR] in
-  def DT              : InstRn<0b0100000000010000,
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "dt $Rn",
-                              [(set i32:$Rn, (sub i32:$src, -1))]>;
+let Defs = [SR] in {
+let isCommutable = 1 in
+def ADDV  : FNM<0b0011, 0b1111, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "addv\t$Rm, $Rn">;
+def SUBV  : FNM<0b0011, 0b1011, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "subv\t$Rm, $Rn">;
+def DT    : FN<0b0100, 0b00010000, (outs GPR:$Rn), (ins GPR:$src),
+               "dt\t$Rn">;
+}
 }
 
 let hasSideEffects = 0 in {
+def NEG   : FNM<0b0110, 0b1011, (outs GPR:$Rn), (ins GPR:$Rm),
+                "neg\t$Rm, $Rn", [(set i32:$Rn, (ineg i32:$Rm))]>;
+let Uses = [SR], Defs = [SR] in
+def NEGC  : FNM<0b0110, 0b1010, (outs GPR:$Rn), (ins GPR:$Rm),
+                "negc\t$Rm, $Rn", [(set i32:$Rn, SR, (SHnegc i32:$Rm, SR))]>;
 
-  // neg Rm, Rn
-  def NEG           : InstRmRn<0b0110000000001011,
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "neg $Rm,$Rn",
-                              [(set i32:$Rn, (ineg i32:$Rm))]>;
-
-  // negc Rm, Rn
-  let Defs = [SR], Uses = [SR] in
-  def NEGC          : InstRmRn<0b0110000000001010,
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "negc $Rm,$Rn",
-                              [(set i32:$Rn, (ineg i32:$Rm))]>;
-
+def EXTSB : FNM<0b0110, 0b1110, (outs GPR:$Rn), (ins GPR:$Rm),
+                "exts.b\t$Rm, $Rn",
+                [(set i32:$Rn, (sext_inreg i32:$Rm, i8))]>;
+def EXTSW : FNM<0b0110, 0b1111, (outs GPR:$Rn), (ins GPR:$Rm),
+                "exts.w\t$Rm, $Rn",
+                [(set i32:$Rn, (sext_inreg i32:$Rm, i16))]>;
+def EXTUB : FNM<0b0110, 0b1100, (outs GPR:$Rn), (ins GPR:$Rm),
+                "extu.b\t$Rm, $Rn", [(set i32:$Rn, (and i32:$Rm, 0xff))]>;
+def EXTUW : FNM<0b0110, 0b1101, (outs GPR:$Rn), (ins GPR:$Rm),
+                "extu.w\t$Rm, $Rn", [(set i32:$Rn, (and i32:$Rm, 0xffff))]>;
 }
 
-
-
-//===--------------------------------------------------------------------------===//
-// Multiplication
-//===--------------------------------------------------------------------------===//
-
-let hasSideEffects = 0, isCommutable = 1 in {
-
-  // mac.w @Rm+, @Rn+
-  let Defs = [MACLO] in
-  def MACW      : InstRmRn<0b0100000000001111, 
-                              (outs), (ins IGPRInc:$Rm, IGPRInc:$Rn),
-                              "mac.w $Rm,$Rn",
-                              []>;
-
-  // mac.l @Rm+, @Rn+
-  let Defs = [MACLO, MACHI], Predicates = [IsSH2] in
-  def MACL          : InstRmRn<0b0000000000001111, 
-                              (outs), (ins IGPRInc:$Rm, IGPRInc:$Rn),
-                              "mac.l $Rm,$Rn",
-                              []>;
-
-  // mul.l Rm, Rn
-  let Defs = [MACLO], Predicates = [IsSH2] in
-  def MULL          : InstRmRn<0b0000000000000111, 
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "mul.l $Rm,$Rn",
-                              []>;
-
-  // muls.w Rm, Rn
-  let Defs = [MACLO] in
-  def MULS          : InstRmRn<0b0010000000001111, 
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "muls.w $Rm,$Rn",
-                              []>;
-
-  // mulu.w Rm, Rn
-  let Defs = [MACLO] in
-  def MULU          : InstRmRn<0b0010000000001110, 
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "mulu.w $Rm,$Rn",
-                              []>;
-
-  // dmuls.l Rm, Rn
-  let Defs = [MACLO, MACHI], Predicates = [IsSH2] in
-  def DMULS         : InstRmRn<0b0011000000001101, 
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "dmuls.l $Rm,$Rn",
-                              []>;
-
-  // dmulu.l Rm, Rn
-  let Defs = [MACLO, MACHI], Predicates = [IsSH2] in
-  def DMULU         : InstRmRn<0b0011000000000101, 
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "dmulu.l $Rm,$Rn",
-                              []>;
+// Multiplication. The results go to MACL (and MACH); the selector uses the
+// pseudo instructions further down, which pair them with sts.
+let hasSideEffects = 0 in {
+let Defs = [MACLO] in {
+def MULL  : FNM<0b0000, 0b0111, (outs), (ins GPR:$Rn, GPR:$Rm),
+                "mul.l\t$Rm, $Rn">;
+def MULSW : FNM<0b0010, 0b1111, (outs), (ins GPR:$Rn, GPR:$Rm),
+                "muls.w\t$Rm, $Rn">;
+def MULUW : FNM<0b0010, 0b1110, (outs), (ins GPR:$Rn, GPR:$Rm),
+                "mulu.w\t$Rm, $Rn">;
+}
+let Defs = [MACHI, MACLO] in {
+def DMULSL : FNM<0b0011, 0b1101, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "dmuls.l\t$Rm, $Rn">;
+def DMULUL : FNM<0b0011, 0b0101, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "dmulu.l\t$Rm, $Rn">;
+}
+let Defs = [MACHI, MACLO], Uses = [MACHI, MACLO, SR],
+    Constraints = "$Rm = $Rm_wb, $Rn = $Rn_wb" in {
+def MACL  : FNM<0b0000, 0b1111, (outs GPR:$Rm_wb, GPR:$Rn_wb),
+                (ins GPR:$Rm, GPR:$Rn), "mac.l\t@${Rm}+, @${Rn}+">;
+def MACW  : FNM<0b0100, 0b1111, (outs GPR:$Rm_wb, GPR:$Rn_wb),
+                (ins GPR:$Rm, GPR:$Rn), "mac.w\t@${Rm}+, @${Rn}+">;
+}
+let Defs = [MACHI, MACLO] in
+def CLRMAC : F0<0b0000000000101000, (outs), (ins), "clrmac">;
 }
 
-
-
-
-//===--------------------------------------------------------------------------===//
-// Division
-//===--------------------------------------------------------------------------===//
-
-let hasSideEffects = 0, isCommutable = 1 in {
-
-  // div0s Rm, Rn
-  let Defs = [SR] in
-  def DIV0S         : InstRmRn<0b0010000000000111, 
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "div0s $Rm,$Rn",
-                              []>;
-  
-  // div0u
-  let Defs = [SR] in
-  def DIV0U             : Inst<0b0000000000011001, 
-                              (outs), (ins),
-                              "div0u",
-                              []>;
-
-  // div1 Rm, Rn
-  let Defs = [SR] in
-  def DIV1          : InstRmRn<0b0011000000000100, 
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "div1 $Rm,$Rn",
-                              []>;
+// Division steps.
+let hasSideEffects = 0 in {
+let Defs = [SR] in {
+def DIV0S : FNM<0b0010, 0b0111, (outs), (ins GPR:$Rn, GPR:$Rm),
+                "div0s\t$Rm, $Rn">;
+def DIV0U : F0<0b0000000000011001, (outs), (ins), "div0u">;
+}
+let Defs = [SR], Uses = [SR], Constraints = "$src = $Rn" in
+def DIV1  : FNM<0b0011, 0b0100, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "div1\t$Rm, $Rn">;
 }
 
-
-
-
-//===--------------------------------------------------------------------------===//
-// Sign/Zero Extend
-//===--------------------------------------------------------------------------===//
-  
-// exts.b Rm, Rn
-def EXTSB           : InstRmRn<0b0110000000001110, 
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "exts.b $Rm,$Rn",
-                              [(set i32:$Rn, (sext i8:$Rm))]>;
-
-// exts.w Rm, Rn
-def EXTSW           : InstRmRn<0b0110000000001111, 
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "exts.w $Rm,$Rn",
-                              [(set i32:$Rn, (sext i16:$Rm))]>;
-
-// extu.b Rm, Rn
-def EXTUB           : InstRmRn<0b0110000000001100, 
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "extu.b $Rm,$Rn",
-                              [(set i32:$Rn, (zext i8:$Rm))]>;
-
-// extu.w Rm, Rn
-def EXTUW           : InstRmRn<0b0110000000001101, 
-                              (outs GPR:$Rn), (ins GPR:$Rm),
-                              "extu.w $Rm,$Rn",
-                              [(set i32:$Rn, (zext i16:$Rm))]>;
-
-
-
-
-
-//===--------------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Comparison
-//===--------------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
-// cmp/eq #imm,R0
-let Defs = [R0, SR] in
-def CMPIM             : InstI8<0b1000100000000000,
-                              (outs), (ins imm8:$imm),
-                              "cmp/eq #imm,R0",
-                              []>;
+// Each comparison sets T. The operand order follows the assembler:
+// cmp/gt Rm,Rn sets T when Rn > Rm.
+let hasSideEffects = 0, Defs = [SR] in {
+let isCompare = 1 in {
+let isCommutable = 1 in
+def CMPEQ  : FNM<0b0011, 0b0000, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "cmp/eq\t$Rm, $Rn", [(set SR, (SHcmpeq i32:$Rn, i32:$Rm))]>;
+def CMPHS  : FNM<0b0011, 0b0010, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "cmp/hs\t$Rm, $Rn", [(set SR, (SHcmphs i32:$Rn, i32:$Rm))]>;
+def CMPGE  : FNM<0b0011, 0b0011, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "cmp/ge\t$Rm, $Rn", [(set SR, (SHcmpge i32:$Rn, i32:$Rm))]>;
+def CMPHI  : FNM<0b0011, 0b0110, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "cmp/hi\t$Rm, $Rn", [(set SR, (SHcmphi i32:$Rn, i32:$Rm))]>;
+def CMPGT  : FNM<0b0011, 0b0111, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "cmp/gt\t$Rm, $Rn", [(set SR, (SHcmpgt i32:$Rn, i32:$Rm))]>;
+def CMPPZ  : FN<0b0100, 0b00010001, (outs), (ins GPR:$Rn),
+                "cmp/pz\t$Rn", [(set SR, (SHcmppz i32:$Rn))]>;
+def CMPPL  : FN<0b0100, 0b00010101, (outs), (ins GPR:$Rn),
+                "cmp/pl\t$Rn", [(set SR, (SHcmppl i32:$Rn))]>;
+def CMPEQI : FI8<0b10001000, (outs), (ins R0C:$src, simm8:$imm),
+                 "cmp/eq\t$imm, $src",
+                 [(set SR, (SHcmpeq R0C:$src, simm8:$imm))]> {
+  bits<0> src;
+}
+let isCommutable = 1 in
+def CMPSTR : FNM<0b0010, 0b1100, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "cmp/str\t$Rm, $Rn">;
+let isCommutable = 1 in
+def TST    : FNM<0b0010, 0b1000, (outs), (ins GPR:$Rn, GPR:$Rm),
+                 "tst\t$Rm, $Rn", [(set SR, (SHtst i32:$Rn, i32:$Rm))]>;
+def TSTI   : FI8<0b11001000, (outs), (ins R0C:$src, uimm8:$imm),
+                 "tst\t$imm, $src",
+                 [(set SR, (SHtst R0C:$src, imm_uimm8:$imm))]> {
+  bits<0> src;
+}
+}
+def CLRT   : F0<0b0000000000001000, (outs), (ins), "clrt",
+                [(set SR, (SHclrt))]>;
+def SETT   : F0<0b0000000000011000, (outs), (ins), "sett",
+                [(set SR, (SHsett))]>;
+}
 
-// cmp/eq Rm,Rn
+let Defs = [SR], mayLoad = 1, mayStore = 1, hasSideEffects = 1 in
+def TAS : FN<0b0100, 0b00011011, (outs), (ins GPR:$Rn), "tas.b\t@$Rn">;
+
+//===----------------------------------------------------------------------===//
+// Logic
+//===----------------------------------------------------------------------===//
+
+let hasSideEffects = 0 in {
+let Constraints = "$src = $Rn", isCommutable = 1 in {
+def AND   : FNM<0b0010, 0b1001, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "and\t$Rm, $Rn", [(set i32:$Rn, (and i32:$src, i32:$Rm))]>;
+def OR    : FNM<0b0010, 0b1011, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "or\t$Rm, $Rn", [(set i32:$Rn, (or i32:$src, i32:$Rm))]>;
+def XOR   : FNM<0b0010, 0b1010, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                "xor\t$Rm, $Rn", [(set i32:$Rn, (xor i32:$src, i32:$Rm))]>;
+}
+let Constraints = "$src = $dst" in {
+def ANDI  : FI8<0b11001001, (outs R0C:$dst), (ins R0C:$src, uimm8:$imm),
+                "and\t$imm, $dst",
+                []> {
+  bits<0> dst;
+  bits<0> src;
+}
+def ORI   : FI8<0b11001011, (outs R0C:$dst), (ins R0C:$src, uimm8:$imm),
+                "or\t$imm, $dst",
+                []> {
+  bits<0> dst;
+  bits<0> src;
+}
+def XORI  : FI8<0b11001010, (outs R0C:$dst), (ins R0C:$src, uimm8:$imm),
+                "xor\t$imm, $dst",
+                []> {
+  bits<0> dst;
+  bits<0> src;
+}
+}
+def NOT   : FNM<0b0110, 0b0111, (outs GPR:$Rn), (ins GPR:$Rm),
+                "not\t$Rm, $Rn", [(set i32:$Rn, (not i32:$Rm))]>;
+}
+
+let Uses = [R0, GBR], mayLoad = 1, mayStore = 1, hasSideEffects = 1 in {
+def ANDM : FI8<0b11001101, (outs), (ins uimm8:$imm), "and.b\t$imm, @(r0, gbr)">;
+def ORM  : FI8<0b11001111, (outs), (ins uimm8:$imm), "or.b\t$imm, @(r0, gbr)">;
+def XORM : FI8<0b11001110, (outs), (ins uimm8:$imm), "xor.b\t$imm, @(r0, gbr)">;
 let Defs = [SR] in
-def CMPEQ           : InstRmRn<0b0011000000000000,
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "cmp/eq $Rm,$Rn",
-                              []>;
+def TSTM : FI8<0b11001100, (outs), (ins uimm8:$imm), "tst.b\t$imm, @(r0, gbr)">;
+}
 
-// cmp/hs Rm,Rn
-let Defs = [SR] in
-def CMPHS           : InstRmRn<0b0011000000000010,
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "cmp/hs $Rm,$Rn",
-                              []>;
-
-// cmp/ge Rm,Rn
-let Defs = [SR] in
-def CMPGE           : InstRmRn<0b0011000000000011,
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "cmp/ge $Rm,$Rn",
-                              []>;
-
-// cmp/hi Rm,Rn
-let Defs = [SR] in
-def CMPHI           : InstRmRn<0b0011000000000110,
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "cmp/hi $Rm,$Rn",
-                              []>;
-
-// cmp/gt Rm,Rn
-let Defs = [SR] in
-def CMPGT           : InstRmRn<0b0011000000000111,
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "cmp/gt $Rm,$Rn",
-                              []>;
-
-// cmp/pl Rn
-let Defs = [SR] in
-def CMPPL             : InstRn<0b0100000000010101,
-                              (outs), (ins GPR:$Rn),
-                              "cmp/pl $Rn",
-                              []>;
-
-// cmp/pz Rn
-let Defs = [SR] in
-def CMPPZ             : InstRn<0b0100000000010001,
-                              (outs), (ins GPR:$Rn),
-                              "cmp/pz $Rn",
-                              []>;
-
-// cmp/str Rm,Rn
-let Defs = [SR] in
-def CMPSTR          : InstRmRn<0b0010000000001100,
-                              (outs), (ins GPR:$Rm, GPR:$Rn),
-                              "cmp/str $Rm,$Rn",
-                              []>;
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                        Logic Operation Instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-
-// and Rm,Rn
-let Constraints = "$src = $Rn" in
-def AND             : InstRmRn<0b0010000000001001, 
-                            (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                            "and $Rm,$Rn",
-                            [(set i32:$Rn, (and i32:$Rm, i32:$src))]>;
-// and #imm,R0
-let Defs = [R0], Uses = [R0] in
-def ANDI            : InstI8<0b1100100100000000, 
-                            (outs), (ins imm8:$imm),
-                            "and $imm,R0",
-                            []>;
-// and #imm,@(R0,GBR)
-let Uses = [R0, GBR] in
-def ANDM            : InstI8<0b1100110100000000, 
-                            (outs), (ins imm8:$imm),
-                            "and $imm,@(r0,gbr)",
-                            []>;
-
-// not Rm,Rn
-def NOT           : InstRmRn<0b0110000000000111, 
-                            (outs GPR:$Rn), (ins GPR:$Rm),
-                            "not $Rm,$Rn",
-                            [(set i32:$Rn, (not i32:$Rm))]>;
-
-// or Rm,Rn
-let Constraints = "$src = $Rn" in
-def OR            : InstRmRn<0b0010000000001011, 
-                            (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                            "or $Rm,$Rn",
-                            [(set i32:$Rn, (or i32:$Rm, i32:$src))]>;
-// or #imm,R0
-let Defs = [R0], Uses = [R0] in
-def ORI             : InstI8<0b1100101100000000, 
-                            (outs), (ins imm8:$imm),
-                            "or $imm,R0",
-                            []>;
-// or.b #imm,@(R0,GBR)
-let Uses = [R0, GBR] in
-def ORM             : InstI8<0b1100111100000000, 
-                            (outs), (ins imm8:$imm),
-                            "or.b $imm,@(r0,gbr)",
-                            []>;
-
-// xor Rm,Rn
-let Constraints = "$src = $Rn" in
-def XOR           : InstRmRn<0b0010000000001010, 
-                            (outs GPR:$Rn), (ins GPR:$Rm, GPR:$src),
-                            "xor $Rm,$Rn",
-                            [(set i32:$Rn, (xor i32:$Rm, i32:$src))]>;
-
-// xor #imm,R0
-let Defs = [R0], Uses = [R0] in
-def XORI            : InstI8<0b1100101000000000, 
-                            (outs), (ins imm8:$imm),
-                            "xor $imm,r0",
-                            []>;
-
-// xor.b #imm,@(R0,GBR)
-let Defs = [R0], Uses = [R0] in
-def XORM            : InstI8<0b1100111000000000, 
-                            (outs), (ins imm8:$imm),
-                            "xor.b $imm,@(r0,gbr)",
-                            []>;
-
-// tas.b @Rn
-let Defs = [SR] in
-def TAS             : InstRn<0b0010000000001000, 
-                            (outs), (ins IGPR:$Rn),
-                            "tas.b $Rn",
-                            []>;
-
-// tst Rm,Rn
-let Defs = [SR] in
-def TST           : InstRmRn<0b0010000000001000, 
-                            (outs), (ins GPR:$Rm, GPR:$Rn),
-                            "tst $Rm,$Rn",
-                            []>;
-// tst #imm,R0
-let Defs = [SR], Uses = [R0] in
-def TSTI            : InstI8<0b1100100000000000, 
-                            (outs), (ins imm8:$imm),
-                            "tst $imm,r0",
-                            []>;
-
-// tst.b #imm,@(R0,GBR)
-let Defs = [SR], Uses = [R0, GBR] in
-def TSTM            : InstI8<0b1100110000000000, 
-                            (outs), (ins imm8:$imm),
-                            "tst.b $imm,@(r0,gbr)",
-                            []>;
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                              Shift Instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
+// Shifts
+//===----------------------------------------------------------------------===//
 
 let hasSideEffects = 0, Constraints = "$src = $Rn" in {
+let Defs = [SR] in {
+def ROTL   : FN<0b0100, 0b00000100, (outs GPR:$Rn), (ins GPR:$src), "rotl\t$Rn",
+                [(set i32:$Rn, (rotl i32:$src, (i32 1)))]>;
+def ROTR   : FN<0b0100, 0b00000101, (outs GPR:$Rn), (ins GPR:$src), "rotr\t$Rn",
+                [(set i32:$Rn, (rotr i32:$src, (i32 1)))]>;
+def SHAL   : FN<0b0100, 0b00100000, (outs GPR:$Rn), (ins GPR:$src), "shal\t$Rn">;
+def SHAR   : FN<0b0100, 0b00100001, (outs GPR:$Rn), (ins GPR:$src), "shar\t$Rn",
+                [(set i32:$Rn, (sra i32:$src, (i32 1)))]>;
+def SHLL   : FN<0b0100, 0b00000000, (outs GPR:$Rn), (ins GPR:$src), "shll\t$Rn",
+                [(set i32:$Rn, (shl i32:$src, (i32 1)))]>;
+def SHLR   : FN<0b0100, 0b00000001, (outs GPR:$Rn), (ins GPR:$src), "shlr\t$Rn",
+                [(set i32:$Rn, (srl i32:$src, (i32 1)))]>;
+}
+let Defs = [SR], Uses = [SR] in {
+def ROTCL  : FN<0b0100, 0b00100100, (outs GPR:$Rn), (ins GPR:$src), "rotcl\t$Rn">;
+def ROTCR  : FN<0b0100, 0b00100101, (outs GPR:$Rn), (ins GPR:$src), "rotcr\t$Rn">;
+}
+def SHLL2  : FN<0b0100, 0b00001000, (outs GPR:$Rn), (ins GPR:$src), "shll2\t$Rn",
+                [(set i32:$Rn, (shl i32:$src, (i32 2)))]>;
+def SHLL8  : FN<0b0100, 0b00011000, (outs GPR:$Rn), (ins GPR:$src), "shll8\t$Rn",
+                [(set i32:$Rn, (shl i32:$src, (i32 8)))]>;
+def SHLL16 : FN<0b0100, 0b00101000, (outs GPR:$Rn), (ins GPR:$src), "shll16\t$Rn",
+                [(set i32:$Rn, (shl i32:$src, (i32 16)))]>;
+def SHLR2  : FN<0b0100, 0b00001001, (outs GPR:$Rn), (ins GPR:$src), "shlr2\t$Rn",
+                [(set i32:$Rn, (srl i32:$src, (i32 2)))]>;
+def SHLR8  : FN<0b0100, 0b00011001, (outs GPR:$Rn), (ins GPR:$src), "shlr8\t$Rn",
+                [(set i32:$Rn, (srl i32:$src, (i32 8)))]>;
+def SHLR16 : FN<0b0100, 0b00101001, (outs GPR:$Rn), (ins GPR:$src), "shlr16\t$Rn",
+                [(set i32:$Rn, (srl i32:$src, (i32 16)))]>;
 
-  // rotcl Rn
-  let Defs = [SR] in
-  def ROTCL           : InstRn<0b0100000000100100, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "rotcl $Rn",
-                              []>;
-
-  // rotcr Rn
-  let Defs = [SR] in
-  def ROTCR           : InstRn<0b0100000000100101, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "rotcr $Rn",
-                              []>;
-
-  // rotl Rn
-  let Defs = [SR] in
-  def ROTL            : InstRn<0b0100000000000100, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "rotl $Rn",
-                              [(set i32:$Rn, (rotl i32:$src, (i8 1)))]>;
-
-  // rotr Rn
-  let Defs = [SR] in
-  def ROTR            : InstRn<0b0100000000000101, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "rotr $Rn",
-                              [(set i32:$Rn, (rotr i32:$src, (i8 1)))]>;
-
-  // shal Rn
-  let Defs = [SR] in
-  def SHAL            : InstRn<0b0100000000100000, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shal $Rn",
-                              []>;
-
-  // shar Rn
-  let Defs = [SR] in
-  def SHAR            : InstRn<0b0100000000100001, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shar $Rn",
-                              []>;
-
-  // shll Rn
-  let Defs = [SR] in
-  def SHLL            : InstRn<0b0100000000000000, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shll $Rn",
-                              []>;
-
-  // shll2 Rn
-  let Defs = [SR] in
-  def SHLL2           : InstRn<0b0100000000001000, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shll2 $Rn",
-                              []>;
-
-  // shll8 Rn
-  def SHLL8           : InstRn<0b0100000000011000, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shll8 $Rn",
-                              []>;
-
-  // shll16 Rn
-  def SHLL16          : InstRn<0b0100000000101000, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shll16 $Rn",
-                              []>;
-
-  // shlr Rn
-  let Defs = [SR] in
-  def SHLR            : InstRn<0b0100000000000001, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shlr $Rn",
-                              []>;
-
-  // shlr2 Rn
-  def SHLR2           : InstRn<0b0100000000001001, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shlr2 $Rn",
-                              []>;
-
-  // shlr8 Rn
-  def SHLR8           : InstRn<0b0100000000011001, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shlr8 $Rn",
-                              []>;
-
-  // shlr16 Rn
-  def SHLR16          : InstRn<0b0100000000101001, 
-                              (outs GPR:$Rn), (ins GPR:$src),
-                              "shlr16 $Rn",
-                              []>;
-
+// SH-3 dynamic shifts: a positive count shifts left, a negative one right.
+let Predicates = [IsSH3] in {
+def SHAD   : FNM<0b0100, 0b1100, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                 "shad\t$Rm, $Rn">;
+def SHLD   : FNM<0b0100, 0b1101, (outs GPR:$Rn), (ins GPR:$src, GPR:$Rm),
+                 "shld\t$Rm, $Rn">;
+}
 }
 
+//===----------------------------------------------------------------------===//
+// Branches, calls and returns
+//===----------------------------------------------------------------------===//
 
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                              Branch Instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
+let isBranch = 1, isTerminator = 1, isDelayIllegal = 1, hasSideEffects = 0,
+    Uses = [SR] in {
+def BT  : FD8<0b10001001, (outs), (ins brtarget8:$disp), "bt\t$disp">;
+def BF  : FD8<0b10001011, (outs), (ins brtarget8:$disp), "bf\t$disp">;
+let hasDelaySlot = 1 in {
+def BTS : FD8<0b10001101, (outs), (ins brtarget8:$disp), "bt/s\t$disp">;
+def BFS : FD8<0b10001111, (outs), (ins brtarget8:$disp), "bf/s\t$disp">;
+}
+}
 
-let isTerminator = 1 in {
-  let isBranch = 1 in
-  def BF              : InstD8<0b1000101100000000, 
-                              (outs), (ins brtarget:$disp),
-                              "bf $disp",
-                              []>;
+let isBranch = 1, isTerminator = 1, isBarrier = 1, hasDelaySlot = 1,
+    isDelayIllegal = 1, hasSideEffects = 0 in {
+def BRA  : FD12<0b1010, (outs), (ins brtarget12:$disp), "bra\t$disp">;
+let isIndirectBranch = 1 in {
+def BRAF : FM<0b0000, 0b00100011, (outs), (ins GPR:$Rm), "braf\t$Rm">;
+def JMP  : FM<0b0100, 0b00101011, (outs), (ins GPR:$Rm), "jmp\t@$Rm",
+              [(brind i32:$Rm)]>;
+}
+}
 
-  let isBranch = 1 in
-  def BT              : InstD8<0b1000100100000000, 
-                              (outs), (ins brtarget:$disp),
-                              "bt $disp",
-                              []>;
+let isCall = 1, hasDelaySlot = 1, isDelayIllegal = 1, Defs = [PR] in {
+def JSR  : FM<0b0100, 0b00001011, (outs), (ins GPR:$Rm), "jsr\t@$Rm",
+              [(SHcall i32:$Rm)]>;
+def BSR  : FD12<0b1011, (outs), (ins brtarget12:$disp), "bsr\t$disp">;
+def BSRF : FM<0b0000, 0b00000011, (outs), (ins GPR:$Rm), "bsrf\t$Rm">;
+}
 
-  let isBranch = 1, isBarrier = 1, hasDelaySlot = 1 in
-  def BRA            : InstD12<0b1010000000000000, 
-                              (outs), (ins brtarget:$disp),
-                              "bra $disp",
-                              [(br bb:$disp)]>;
+// rts reads PR, but PR is not modelled as live into the function: the
+// prologue saves it when calls clobber it and the delay slot filler keeps
+// PR writes out of rts's slot.
+let isReturn = 1, isTerminator = 1, isBarrier = 1, hasDelaySlot = 1,
+    isDelayIllegal = 1 in
+def RTS  : F0<0b0000000000001011, (outs), (ins), "rts", [(SHret)]>;
 
-  let isBranch = 1, isBarrier = 1, hasDelaySlot = 1 in
-  def BSR            : InstD12<0b1011000000000000, 
-                              (outs), (ins brtarget:$disp),
-                              "bsr $disp",
-                              []>;
+let isReturn = 1, isTerminator = 1, isBarrier = 1, hasDelaySlot = 1,
+    isDelayIllegal = 1, hasSideEffects = 1 in
+def RTE  : F0<0b0000000000101011, (outs), (ins), "rte">;
 
-  let isBranch = 1, isBarrier = 1, hasDelaySlot = 1 in
-  def JMP             : InstRm<0b0100000000101011, 
-                              (outs), (ins IGPR:$Rm),
-                              "jmp $Rm",
-                              []>;
+//===----------------------------------------------------------------------===//
+// System control
+//===----------------------------------------------------------------------===//
 
-  let Predicates = [IsSH2] in {
-  let isBranch = 1, hasDelaySlot = 1 in
-  def BFS             : InstD8<0b1000111100000000, 
-                              (outs), (ins brtarget:$disp),
-                              "bf/s $disp",
-                              []>;
+let hasSideEffects = 0 in
+def NOP : F0<0b0000000000001001, (outs), (ins), "nop">;
 
-  let isBranch = 1, hasDelaySlot = 1 in
-  def BTS             : InstD8<0b1000110100000000, 
-                              (outs), (ins brtarget:$disp),
-                              "bt/s $disp",
-                              []>;
+let hasSideEffects = 1 in {
+def CLRS  : F0<0b0000000001001000, (outs), (ins), "clrs">;
+def SETS  : F0<0b0000000001011000, (outs), (ins), "sets">;
+let isDelayIllegal = 1 in
+def SLEEP : F0<0b0000000000011011, (outs), (ins), "sleep">;
+def LDTLB : F0<0b0000000000111000, (outs), (ins), "ldtlb">;
+def PREF  : FN<0b0000, 0b10000011, (outs), (ins GPR:$Rn), "pref\t@$Rn">;
+let isDelayIllegal = 1 in
+def TRAPA : FI8<0b11000011, (outs), (ins uimm8:$imm), "trapa\t$imm">;
+}
 
-  let isIndirectBranch = 1, isBarrier = 1, hasDelaySlot = 1 in
-  def BRAF            : InstRm<0b0000000000100011, 
-                              (outs), (ins GPR:$Rm),
-                              "braf $Rm",
-                              []>;
-
-  let isBranch = 1, isBarrier = 1, hasDelaySlot = 1 in
-  def BSRF            : InstRm<0b0000000000000011, 
-                              (outs), (ins GPR:$Rm),
-                              "bsrf $Rm",
-                              []>;
+// Moves between general and control or system registers.
+multiclass SHCtrlMoves<string name, Register reg, bits<8> ldcop,
+                       bits<8> ldcmop, bits<8> stcop, bits<8> stcmop,
+                       string ld, string st> {
+  let Defs = [reg], hasSideEffects = 1 in {
+  def LD # NAME  : FM<0b0100, ldcop, (outs), (ins GPR:$Rm),
+                      ld # "\t$Rm, " # name>;
+  let mayLoad = 1, Constraints = "$Rm = $Rm_wb" in
+  def LD # NAME # P : FM<0b0100, ldcmop, (outs GPR:$Rm_wb), (ins GPR:$Rm),
+                         ld # ".l\t@${Rm}+, " # name>;
+  }
+  let Uses = [reg], hasSideEffects = 1 in {
+  def ST # NAME  : FN<0b0000, stcop, (outs GPR:$Rn), (ins),
+                      st # "\t" # name # ", $Rn">;
+  let mayStore = 1, Constraints = "$Rn = $Rn_wb" in
+  def ST # NAME # P : FN<0b0100, stcmop, (outs GPR:$Rn_wb), (ins GPR:$Rn),
+                         st # ".l\t" # name # ", @-$Rn">;
   }
 }
 
-
-
-//===--------------------------------------------------------------------------===//
-// Call Instructions
-//===--------------------------------------------------------------------------===//
-
-let isCall = 1, isBarrier = 1, isTerminator = 1, hasDelaySlot = 1 in {
-  let Uses = [PR, PC] in
-  def JSR             : InstRm<0b0100000000001011,
-                              (outs), (ins IGPR:$Rm),
-                              "jsr $Rm",
-                              [(SHCall IGPR:$Rm)]>;
+let isDelayIllegal = 1 in {
+defm SR   : SHCtrlMoves<"sr",   SR,    0b00001110, 0b00000111,
+                        0b00000010, 0b00000011, "ldc", "stc">;
+defm SSR  : SHCtrlMoves<"ssr",  SSR,   0b00111110, 0b00110111,
+                        0b00110010, 0b00110011, "ldc", "stc">;
+defm SPC  : SHCtrlMoves<"spc",  SPC,   0b01001110, 0b01000111,
+                        0b01000010, 0b01000011, "ldc", "stc">;
+defm VBR  : SHCtrlMoves<"vbr",  VBR,   0b00101110, 0b00100111,
+                        0b00100010, 0b00100011, "ldc", "stc">;
 }
-
-
-
-
-
-//===--------------------------------------------------------------------------===//
-// Return Instructions
-//===--------------------------------------------------------------------------===//
-
-let isTerminator = 1, isReturn = 1, isBarrier = 1, hasDelaySlot = 1 in {
-  def RTS               : Inst<0b0000000000001011,
-                              (outs), (ins),
-                              "rts",
-                              [(SHRetGlue)]>;
-}
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                          System Control Instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-
-// clrmac
-def CLRMAC              : Inst<0b0000000000101000, (outs), (ins), "clrmac", []>;
-
-// clrt
-let Defs = [SR] in
-def CLRT                : Inst<0b0000000000001000, (outs), (ins), "clrt", []>;
-
-// ldc Rm, SR
-let Defs = [SR], isDelayIllegal = 1 in
-def LDCSR             : InstRm<0b0100000000001110, 
-                              (outs), (ins GPR:$Rm), 
-                              "ldc $Rm,sr",
-                              []>;
-
-// ldc.l @Rm+, SR
-let Defs = [SR], isDelayIllegal = 1 in
-def LDCMSR            : InstRm<0b0100000000000111, 
-                              (outs), (ins IGPRInc:$Rm), 
-                              "ldc.l $Rm,sr",
-                              []>;
-
-// ldc Rm, GBR
-let Defs = [GBR] in
-def LDCGBR            : InstRm<0b0100000000011110, 
-                              (outs), (ins GPR:$Rm), 
-                              "ldc $Rm,gbr",
-                              []>;
-
-// ldc.l @Rm+, GBR
-let Defs = [GBR] in
-def LDCMGBR           : InstRm<0b0100000000010111, 
-                              (outs), (ins IGPRInc:$Rm), 
-                              "ldc.l $Rm,gbr",
-                              []>;
-
-// ldc Rm, VBR
-let Defs = [VBR], isDelayIllegal = 1 in
-def LDCVBR            : InstRm<0b0100000000101110, 
-                              (outs), (ins GPR:$Rm), 
-                              "ldc $Rm,vbr",
-                              []>;
-
-// ldc.l @Rm+, VBR
-let Defs = [VBR], isDelayIllegal = 1 in
-def LDCMVBR           : InstRm<0b0100000000100111, 
-                              (outs), (ins IGPRInc:$Rm), 
-                              "ldc.l $Rm,vbr",
-                              []>;
-
-// lds Rm, MACH
-let Defs = [MACHI] in
-def LDSMACH           : InstRm<0b0100000000001010, 
-                              (outs), (ins GPR:$Rm), 
-                              "lds $Rm,mach",
-                              []>;
-
-// lds.l @Rm+, MACH
-let Defs = [MACHI] in
-def LDSMMACH           : InstRm<0b0100000000000110, 
-                              (outs), (ins IGPRInc:$Rm), 
-                              "lds.l $Rm,mach",
-                              []>;
-
-// lds Rm, MACL
-let Defs = [MACLO] in
-def LDSMACL           : InstRm<0b0100000000011010, 
-                              (outs), (ins GPR:$Rm), 
-                              "lds $Rm,macl",
-                              []>;
-
-// lds.l @Rm+, MACL
-let Defs = [MACLO] in
-def LDSMMACL          : InstRm<0b0100000000010110, 
-                              (outs), (ins IGPRInc:$Rm), 
-                              "lds.l $Rm,macl",
-                              []>;
-
-// lds Rm, PR
-let Defs = [PR] in
-def LDSPR             : InstRm<0b0100000000101010, 
-                              (outs), (ins GPR:$Rm), 
-                              "lds $Rm,pr",
-                              []>;
-
-// lds.l @Rm+, PR
-let Defs = [PR] in
-def LDSMPR            : InstRm<0b0100000000100110, 
-                              (outs), (ins IGPRInc:$Rm), 
-                              "lds.l $Rm,pr",
-                              []>;
-
-// nop
-let hasSideEffects = 1, isTerminator = 1 in
-def NOP                 : Inst<0b0000000000001001, (outs), (ins), "nop", []>;
-
-// rte
-let isTerminator = 1, isReturn = 1, isBranch = 1, hasDelaySlot = 1 in
-def RTE                 : Inst<0b0000000000101011, (outs), (ins), "rte", []>;
-
-// sett
-let Defs = [SR] in
-def SETT                : Inst<0b0000000000011000, (outs), (ins), "sett", []>;
-
-// sleep
-let hasSideEffects = 1, isDelayIllegal = 1 in
-def SLEEP               : Inst<0b0000000000011011, (outs), (ins), "sleep", []>;
-
-// stc SR,Rn
-let Uses = [SR], isDelayIllegal = 1 in
-def STCSR             : InstRn<0b0000000000000010, 
-                              (outs GPR:$Rn), (ins), 
-                              "stc sr,$Rn",
-                              []>;
-
-// stc.l SR,@-Rn
-let Uses = [SR], isDelayIllegal = 1 in
-def STCMSR            : InstRn<0b0100000000000011, 
-                              (outs IGPRDec:$Rn), (ins), 
-                              "stc.l sr,$Rn",
-                              []>;
-
-// stc GBR,Rn
-let Uses = [GBR] in
-def STCGBR          : InstRn<0b0000000000010010, 
-                              (outs GPR:$Rn), (ins), 
-                              "stc gbr,$Rn",
-                              []>;
-
-// stc.l GBR,@-Rn
-let Uses = [GBR] in
-def STCMGBR           : InstRn<0b0100000000010011, 
-                              (outs IGPRDec:$Rn), (ins), 
-                              "stc.l gbr,$Rn",
-                              []>;
-
-// stc VBR,Rn
-let Uses = [VBR], isDelayIllegal = 1 in
-def STCVBR            : InstRn<0b0000000000100010, 
-                              (outs GPR:$Rn), (ins), 
-                              "stc vbr,$Rn",
-                              []>;
-
-// stc.l VBR,@-Rn
-let Uses = [VBR], isDelayIllegal = 1 in
-def STCMVBR           : InstRn<0b0100000000100011, 
-                              (outs IGPRDec:$Rn), (ins), 
-                              "stc.l vbr,$Rn",
-                              []>;
-
-// sts MACH,Rn
-let Uses = [MACHI] in
-def STSMACH           : InstRn<0b0000000000001010, 
-                              (outs GPR:$Rn), (ins), 
-                              "sts mach,$Rn",
-                              []>;
-
-// sts.l MACH,@-Rn
-let Uses = [MACHI] in
-def STSMMACH          : InstRn<0b0100000000000010, 
-                              (outs IGPRDec:$Rn), (ins), 
-                              "sts.l mach,$Rn",
-                              []>;
-
-// sts MACL,Rn
-let Uses = [MACLO] in
-def STSMACL           : InstRn<0b0000000000011010, 
-                              (outs GPR:$Rn), (ins), 
-                              "sts macl,$Rn",
-                              []>;
-
-// sts.l MACL,@-Rn
-let Uses = [MACLO] in
-def STSMMACL          : InstRn<0b0100000000010010, 
-                              (outs IGPRDec:$Rn), (ins), 
-                              "sts.l macl,$Rn",
-                              []>;
-
-// sts PR,Rn
-let Uses = [PR] in
-def STSPR             : InstRn<0b0000000000101010, 
-                              (outs GPR:$Rn), (ins), 
-                              "sts pr,$Rn",
-                              []>;
-
-// sts.l PR,@-Rn
-let Uses = [PR] in
-def STSMPR            : InstRn<0b0100000000100010, 
-                              (outs IGPRDec:$Rn), (ins), 
-                              "sts.l pr,$Rn",
-                              []>;
-
-// trapa #imm
-let Defs = [PC], isCall = 1 in
-def TRAPA             : InstI8<0b1100001100000000, 
-                              (outs), (ins imm8:$imm), 
-                              "trapa $imm",
-                              []>;
-
-
-
-
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                                  Extensions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-
-include "SuperHInstrDSP.td"
-include "SuperHInstrFPU.td"
-include "SuperHInstrSH3.td"
-include "SuperHInstrSH4.td"
-
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                              Pseudo instructions
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-
-//===--------------------------------------------------------------------------===//
-// Conditional Branching
-//===--------------------------------------------------------------------------===//
-// NOTE:  SuperH only has BT (Branch if True) and BF (Branch if False)
-//        as such we'll lower these to pseudo instructions instead, then
-//        later emit real machine code instructions from them.
-//        Additionally, conditional branch sequences can be multiple
-//        instructions long, which can wreak havoc with the LLVM branch
-//        handling.
-//===--------------------------------------------------------------------------===//
-
-let isBranch = 1, isTerminator = 1, Uses = [SR] in {
-def BRCC       : SHPseudo<(outs), (ins brtarget:$disp, i8imm:$cc),
-                          "! BREQ $disp, $cc",
-                          [/*(SHbrcond bb:$disp, i8:$cc)*/]>;
-}
-
-
-
-
-
-//===--------------------------------------------------------------------------===//
-// SelectCC & SetCC
-//===--------------------------------------------------------------------------===//
-
-def Select8     : SHSelectPseudo<(outs GPR:$dst),
-                                (ins GPR:$src, GPR:$src2, i8imm:$cc),
-                                "! Select8 PSEUDO",
-                                [(set i8:$dst,
-                                 (SHselectcc i8:$src, i8:$src2, timm:$cc))]>;
-
-def Select16    : SHSelectPseudo<(outs GPR:$dst),
-                                (ins GPR:$src, GPR:$src2, i8imm:$cc),
-                                "! Select16 PSEUDO",
-                                [(set i16:$dst,
-                                 (SHselectcc i16:$src, i16:$src2, timm:$cc))]>;
-
-def Select32    : SHSelectPseudo<(outs GPR:$dst),
-                                (ins GPR:$src, GPR:$src2, i8imm:$cc),
-                                "! Select32 PSEUDO",
-                                [(set i32:$dst,
-                                 (SHselectcc i32:$src, i32:$src2, timm:$cc))]>;
-
-//===--------------------------------------------------------------------------===//
-// Load/Store
-//===--------------------------------------------------------------------------===//
-
-let mayLoad = 1, isReMaterializable = 1 in {
-
-// LOAD FROM ADDRESS
-let Defs = [R0, R1] in
-def MOVBLP    : SHLoadPseudo<(outs GPR:$Rn), (ins (memri $Rm, $disp):$src),
-                            "! MOVBLP $src, $Rn",
-                            []>;
-
-let Defs = [R0, R1] in
-def MOVWLP    : SHLoadPseudo<(outs GPR:$Rn), (ins (memri $Rm, $disp):$src),
-                            "! MOVWLP $src, $Rn",
-                            []>;
-
-let Defs = [R1] in
-def MOVLLP    : SHLoadPseudo<(outs GPR:$Rn), (ins (memri $Rm, $disp):$src),
-                            "! MOVLLP $src, $Rn",
-                            []>;
-
-// LOAD FROM FRAME
-let Defs = [R0, R1] in
-def MOVBLF    : SHLoadPseudo<(outs GPR:$Rn), (ins (memri $Rm, $disp):$src),
-                            "! MOVBLF $src, $Rn",
-                            []>;
-
-let Defs = [R0, R1] in
-def MOVWLF    : SHLoadPseudo<(outs GPR:$Rn), (ins (memri $Rm, $disp):$src),
-                            "! MOVWLF $src, $Rn",
-                            []>;
-
-let Defs = [R1] in
-def MOVLLF    : SHLoadPseudo<(outs GPR:$Rn), (ins (memri $Rm, $disp):$src),
-                            "! MOVLLF $src, $Rn",
-                            []>;
-}
-
-let isReMaterializable = 1 in {
-
-// STORE TO ADDRESS
-let Defs = [R0, R1] in
-def MOVBSP    : SHStorePseudo<(outs), (ins GPR:$src, (memri $Rm, $disp):$dst),
-                             "! MOVBSP $src, $dst",
-                             [(truncstorei8 i32:$src, addr:$dst)]>;
-
-let Defs = [R0, R1] in
-def MOVWSP    : SHStorePseudo<(outs), (ins GPR:$src, (memri $Rm, $disp):$dst),
-                             "! MOVWSP $src, $dst",
-                             [(truncstorei16 i32:$src, addr:$dst)]>;
-
-let Defs = [R1] in
-def MOVLSP    : SHStorePseudo<(outs), (ins GPR:$src, (memri $Rm, $disp):$dst),
-                             "! MOVLSP $src, $dst",
-                             [(store i32:$src, addr:$dst)]>;
-
-// STORE TO FRAME
-let Defs = [R0, R1] in
-def MOVBSF    : SHStorePseudo<(outs), (ins GPR:$src, (memri $Rm, $disp):$dst),
-                             "! MOVBSF $src, $dst",
-                             [(truncstorei8 i32:$src, fraddr:$dst)]>;
-
-let Defs = [R0, R1] in
-def MOVWSF    : SHStorePseudo<(outs), (ins GPR:$src, (memri $Rm, $disp):$dst),
-                             "! MOVWSF $src, $dst",
-                             [(truncstorei16 i32:$src, fraddr:$dst)]>;
-
-let Defs = [R1] in
-def MOVLSF    : SHStorePseudo<(outs), (ins GPR:$src, (memri $Rm, $disp):$dst),
-                             "! MOVLSF $src, $dst",
-                             [(store i32:$src, fraddr:$dst)]>;
-
-}
-
-//===--------------------------------------------------------------------------===//
-// Load Immediate
-//===--------------------------------------------------------------------------===//
-
-let isReMaterializable = 1 in {
-def MOVIB         : SHPseudo<(outs GPR:$dst), (ins i8imm:$src),
-                             "! MOVIB $src, $dst",
-                             [(set i8:$dst, anyimm8:$src)]>;
-
-def MOVIW         : SHPseudo<(outs GPR:$dst), (ins i16imm:$src),
-                             "! MOVIW $src, $dst",
-                             [(set i16:$dst, anyimm16:$src)]>;
-
-def MOVIL         : SHPseudo<(outs GPR:$dst), (ins i32imm:$src),
-                             "! MOVIL $src, $dst",
-                             [(set i32:$dst, anyimm32:$src)]>;
-}
-
-
-
-
-//===--------------------------------------------------------------------------===//
-// Shifts
-//===--------------------------------------------------------------------------===//
-
-// Shift by immediate
-let Defs = [SR], Constraints = "$src = $dst" in {
-def SHLri       : SHPseudo<(outs GPR:$dst), (ins GPR:$src, i32imm:$shift),
-                          "! SHL $src, $shift",
-                          []>;
-
-def SHRri       : SHPseudo<(outs GPR:$dst), (ins GPR:$src, i32imm:$shift),
-                          "! SHR $src, $shift",
-                          []>;
-
-def SRAri       : SHPseudo<(outs GPR:$dst), (ins GPR:$src, i32imm:$shift),
-                          "! SRA $src, $shift",
-                          []>;
-}
-
-// Shift by register
-let Defs = [SR], Constraints = "$src1 = $dst" in {
-def SHLrr       : SHPseudo<(outs GPR:$dst), (ins GPR:$src1, GPR:$src2),
-                          "! SHL $src1, $src2",
-                          []>;
-
-def SHRrr       : SHPseudo<(outs GPR:$dst), (ins GPR:$src1, GPR:$src2),
-                          "! SHR $src1, $src2",
-                          []>;
-
-def SRArr       : SHPseudo<(outs GPR:$dst), (ins GPR:$src1, GPR:$src2),
-                          "! SRA $src1, $src2",
-                          []>;
-}
-
-//===--------------------------------------------------------------------------===//
-// Stack Frame
-//===--------------------------------------------------------------------------===//
-
-// Helper instruction for mapping frame indices to relative frame pointer
-// offsets.
-let Defs = [SR], hasSideEffects = 0 in
-def SHFrmIdx : SHPseudo<(outs GPR:$dst), (ins GPR:$src, disp12:$src2),
-                        "! frame index">;
-
-/// CONSTPOOL_ENTRY - This instruction represents a floating constant pool in
-/// the function.  The first operand is the ID# for this instruction, the second
-/// is the index into the MachineConstantPool that this is, the third is the
-/// size in bytes of this constant pool entry.
-let hasSideEffects = 0, isNotDuplicable = 1, hasNoSchedulingInfo = 1 in
-def CONSTPOOL_ENTRY : SHPseudo<(outs), (ins memrii:$instid, memrii:$cpidx, i32imm:$size), 
-                              "!CONSTPOOL_ENTRY $instid, $cpidx, $size",
-                              []>;
-
-let Defs = [R0], Uses = [R0] in {
+defm GBR  : SHCtrlMoves<"gbr",  GBR,   0b00011110, 0b00010111,
+                        0b00010010, 0b00010011, "ldc", "stc">;
+defm MACH : SHCtrlMoves<"mach", MACHI, 0b00001010, 0b00000110,
+                        0b00001010, 0b00000010, "lds", "sts">;
+defm MACL : SHCtrlMoves<"macl", MACLO, 0b00011010, 0b00010110,
+                        0b00011010, 0b00010010, "lds", "sts">;
+defm PR   : SHCtrlMoves<"pr",   PR,    0b00101010, 0b00100110,
+                        0b00101010, 0b00100010, "lds", "sts">;
+
+//===----------------------------------------------------------------------===//
+// Pseudo instructions
+//===----------------------------------------------------------------------===//
+
+let Defs = [R15], Uses = [R15] in {
 def ADJCALLSTACKDOWN : SHPseudo<(outs), (ins i32imm:$amt1, i32imm:$amt2),
-                               "!ADJCALLSTACKDOWN $amt1, $amt2",
-                               [(SHCallSeqStart timm:$amt1, timm:$amt2)]>;
-def ADJCALLSTACKUP : SHPseudo<(outs), (ins i32imm:$amt1, i32imm:$amt2),
-                            "!ADJCALLSTACKUP $amt1",
-                            [(SHCallSeqEnd timm:$amt1, timm:$amt2)]>;
+                                [(SHcallseq_start timm:$amt1, timm:$amt2)]>;
+def ADJCALLSTACKUP   : SHPseudo<(outs), (ins i32imm:$amt1, i32imm:$amt2),
+                                [(SHcallseq_end timm:$amt1, timm:$amt2)]>;
 }
 
+// A 32-bit constant or symbol address. The literal pool pass turns it into
+// a PC-relative mov.l from a nearby pool.
+let isReMaterializable = 1, hasSideEffects = 0, mayLoad = 0 in
+def LOADCONST : SHPseudo<(outs GPR:$Rn), (ins literal32:$value)> {
+  let Size = 2;
+}
 
+// The literal pool load the LOADCONST pseudo becomes, before the pool label
+// is known.
+let mayLoad = 0, hasSideEffects = 0, isDelayIllegal = 1 in
+def LOADLITERAL : SHPseudo<(outs GPR:$Rn), (ins literal32:$value)> {
+  let Size = 2;
+}
 
+// A literal pool entry: a label and a 32-bit value.
+let isNotDuplicable = 1, hasSideEffects = 0 in
+def LITERAL : SHPseudo<(outs), (ins i32imm:$label, literal32:$value)> {
+  let Size = 4;
+}
 
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
-//                            Non-Instruction Patterns
-//===--------------------------------------------------------------------------===//
-//===--------------------------------------------------------------------------===//
+// Alignment padding before a literal pool.
+let hasSideEffects = 0 in
+def ALIGNPOOL : SHPseudo<(outs), (ins)> {
+  let Size = 2;
+}
 
-def : Pat<(sext_inreg i32:$src, i1),  (EXTSB i32:$src)>;
-def : Pat<(sext_inreg i32:$src, i8),  (EXTSB i32:$src)>;
-def : Pat<(sext_inreg i32:$src, i16), (EXTSW i32:$src)>;
+// Frame accesses, expanded by eliminateFrameIndex.
+let mayLoad = 1, hasSideEffects = 0 in {
+def LDB_FI : SHPseudo<(outs GPR:$Rn), (ins frameaddr:$addr)>;
+def LDW_FI : SHPseudo<(outs GPR:$Rn), (ins frameaddr:$addr)>;
+def LDL_FI : SHPseudo<(outs GPR:$Rn), (ins frameaddr:$addr)>;
+}
+let mayStore = 1, hasSideEffects = 0 in {
+def STB_FI : SHPseudo<(outs), (ins GPR:$Rm, frameaddr:$addr)>;
+def STW_FI : SHPseudo<(outs), (ins GPR:$Rm, frameaddr:$addr)>;
+def STL_FI : SHPseudo<(outs), (ins GPR:$Rm, frameaddr:$addr)>;
+}
+let hasSideEffects = 0, isReMaterializable = 1 in
+def FRAMEADDR : SHPseudo<(outs GPR:$Rn), (ins frameaddr:$addr)>;
 
-//===--------------------------------------------------------------------------===//
-// Shifts
-//===--------------------------------------------------------------------------===//
-def : Pat<(i32 (shl i32:$src, (i32 timm:$shift))),  (SHLri GPR:$src,  i32imm:$shift)>;
-def : Pat<(i32 (srl i32:$src, (i32 timm:$shift))),  (SHRri GPR:$src,  i32imm:$shift)>;
-def : Pat<(i32 (sra i32:$src, (i32 timm:$shift))),  (SRAri GPR:$src,  i32imm:$shift)>;
-def : Pat<(i32 (shl i32:$src1, i32:$src2)),         (SHLrr GPR:$src1, GPR:$src2)>;
-def : Pat<(i32 (srl i32:$src1, i32:$src2)),         (SHRrr GPR:$src1, GPR:$src2)>;
-def : Pat<(i32 (sra i32:$src1, i32:$src2)),         (SRArr GPR:$src1, GPR:$src2)>;
+// Multiplications through MACL/MACH.
+let hasSideEffects = 0, Defs = [MACLO] in {
+let isCommutable = 1 in
+def MUL32 : SHPseudo<(outs GPR:$Rd), (ins GPR:$Rn, GPR:$Rm),
+                     [(set i32:$Rd, (mul i32:$Rn, i32:$Rm))]>;
+}
+let hasSideEffects = 0, Defs = [MACHI, MACLO], isCommutable = 1 in {
+def MULHS32 : SHPseudo<(outs GPR:$Rd), (ins GPR:$Rn, GPR:$Rm),
+                       [(set i32:$Rd, (mulhs i32:$Rn, i32:$Rm))]>;
+def MULHU32 : SHPseudo<(outs GPR:$Rd), (ins GPR:$Rn, GPR:$Rm),
+                       [(set i32:$Rd, (mulhu i32:$Rn, i32:$Rm))]>;
+def SMULLOHI : SHPseudo<(outs GPR:$Lo, GPR:$Hi), (ins GPR:$Rn, GPR:$Rm),
+                        [(set i32:$Lo, i32:$Hi,
+                              (smullohi i32:$Rn, i32:$Rm))]>;
+def UMULLOHI : SHPseudo<(outs GPR:$Lo, GPR:$Hi), (ins GPR:$Rn, GPR:$Rm),
+                        [(set i32:$Lo, i32:$Hi,
+                              (umullohi i32:$Rn, i32:$Rm))]>;
+}
 
-//===--------------------------------------------------------------------------===//
-// Loads
-//===--------------------------------------------------------------------------===//
+// Select on T. Expanded into a branch diamond by the custom inserter.
+let usesCustomInserter = 1, hasSideEffects = 0, Uses = [SR] in
+def SELECT : SHPseudo<(outs GPR:$dst), (ins GPR:$tval, GPR:$fval),
+                      [(set i32:$dst, (SHselect i32:$tval, i32:$fval, SR))]>;
 
-def : Pat<(i32 (load          addr:$src)),               (MOVLLP   addr:$src)>;
-def : Pat<(i32 (sextloadi1    addr:$src)), (EXTSB (EXTUB (MOVBLP   addr:$src)))>;
-def : Pat<(i32 (sextloadi8    addr:$src)), (EXTSB (EXTUB (MOVBLP   addr:$src)))>;
-def : Pat<(i32 (sextloadi16   addr:$src)),        (EXTSW (MOVWLP   addr:$src))>;
-def : Pat<(i32 (zextloadi1    addr:$src)),        (EXTUB (MOVBLP   addr:$src))>;
-def : Pat<(i32 (zextloadi8    addr:$src)),        (EXTUB (MOVBLP   addr:$src))>;
-def : Pat<(i32 (zextloadi16   addr:$src)),        (EXTUW (MOVWLP   addr:$src))>;
-def : Pat<(i32 (load        fraddr:$src)),               (MOVLLF fraddr:$src)>;
-def : Pat<(i32 (sextloadi1  fraddr:$src)), (EXTSB (EXTUB (MOVBLF fraddr:$src)))>;
-def : Pat<(i32 (sextloadi8  fraddr:$src)), (EXTSB (EXTUB (MOVBLF fraddr:$src)))>;
-def : Pat<(i32 (sextloadi16 fraddr:$src)),        (EXTSW (MOVWLF fraddr:$src))>;
-def : Pat<(i32 (zextloadi1  fraddr:$src)),        (EXTUB (MOVBLF fraddr:$src))>;
-def : Pat<(i32 (zextloadi8  fraddr:$src)),        (EXTUB (MOVBLF fraddr:$src))>;
-def : Pat<(i32 (zextloadi16 fraddr:$src)),        (EXTUW (MOVWLF fraddr:$src))>;
-def : Pat<(i32 (load           i32:$src)),               (MOVLL     i32:$src)>;
-def : Pat<(i32 (sextloadi1     i32:$src)), (EXTSB (EXTUB (MOVBL     i32:$src)))>;
-def : Pat<(i32 (sextloadi8     i32:$src)), (EXTSB (EXTUB (MOVBL     i32:$src)))>;
-def : Pat<(i32 (sextloadi16    i32:$src)),        (EXTSW (MOVWL     i32:$src))>;
-def : Pat<(i32 (zextloadi1     i32:$src)),        (EXTUB (MOVBL     i32:$src))>;
-def : Pat<(i32 (zextloadi8     i32:$src)),        (EXTUB (MOVBL     i32:$src))>;
-def : Pat<(i32 (zextloadi16    i32:$src)),        (EXTUW (MOVWL     i32:$src))>;
+// Conditional branches with the delay slot filled later. Selected for
+// SHISD::BT and SHISD::BF.
+let isBranch = 1, isTerminator = 1, hasSideEffects = 0, Uses = [SR] in {
+def PseudoBT : SHPseudo<(outs), (ins brtarget8:$dst), [(SHbt bb:$dst, SR)]> {
+  let Size = 2;
+}
+def PseudoBF : SHPseudo<(outs), (ins brtarget8:$dst), [(SHbf bb:$dst, SR)]> {
+  let Size = 2;
+}
+}
+
+let isBranch = 1, isTerminator = 1, isBarrier = 1, hasSideEffects = 0 in
+def PseudoBR : SHPseudo<(outs), (ins brtarget12:$dst), [(br bb:$dst)]> {
+  let Size = 4;
+}
+
+// A branch beyond the reach of bra: saves a register, loads the distance
+// and uses braf. Inserted by branch relaxation.
+let isBranch = 1, isTerminator = 1, isBarrier = 1, hasSideEffects = 0 in
+def PseudoLongBR : SHPseudo<(outs), (ins brtarget12:$dst)> {
+  let Size = 12;
+}
+
+// Constant shift amounts that need a sequence of shift instructions.
+let hasSideEffects = 0, Constraints = "$src = $Rn" in {
+let Defs = [SR] in {
+def SHLLI : SHPseudo<(outs GPR:$Rn), (ins GPR:$src, i32imm:$amount)>;
+def SHLRI : SHPseudo<(outs GPR:$Rn), (ins GPR:$src, i32imm:$amount)>;
+def SHARI : SHPseudo<(outs GPR:$Rn), (ins GPR:$src, i32imm:$amount)>;
+}
+}
+
+//===----------------------------------------------------------------------===//
+// Selection patterns
+//===----------------------------------------------------------------------===//
+
+// Constants.
+def : Pat<(i32 imm_ext8:$v), (EXTUB (MOVI (NegImm8 imm:$v)))>;
+def : Pat<(i32 imm_ext16:$v), (EXTUW (MOVI (NegImm16 imm:$v)))>;
+def : Pat<(i32 imm:$v), (LOADCONST imm:$v)>;
+def : Pat<(SHwrapper tglobaladdr:$a), (LOADCONST tglobaladdr:$a)>;
+def : Pat<(SHwrapper texternalsym:$a), (LOADCONST texternalsym:$a)>;
+def : Pat<(SHwrapper tblockaddress:$a), (LOADCONST tblockaddress:$a)>;
+def : Pat<(SHwrapper tjumptable:$a), (LOADCONST tjumptable:$a)>;
+def : Pat<(SHwrapper tconstpool:$a), (LOADCONST tconstpool:$a)>;
+
+// Loads.
+// Results that must be in R0 are copied out at once, so that the R0
+// constraint doesn't spread to two-address instructions that use them.
+multiclass SHLoadPats<PatFrag op, SHInst plain, SHInst disp, SHInst index,
+                      ComplexPattern dispaddr, SHPseudo frame> {
+  def : Pat<(i32 (op (AddrFrame GPR:$base, i32:$off))),
+            (frame GPR:$base, i32:$off)>;
+  def : Pat<(i32 (op (dispaddr GPR:$base, i32:$off))),
+            (COPY_TO_REGCLASS (disp GPR:$base, i32:$off), GPR)>;
+  def : Pat<(i32 (op (AddrIndex R0C:$idx, GPR:$base))),
+            (index R0C:$idx, GPR:$base)>;
+  def : Pat<(i32 (op GPR:$addr)), (plain GPR:$addr)>;
+}
+
+defm : SHLoadPats<load, LDL, LDLD, LDLX, AddrDisp4, LDL_FI>;
+defm : SHLoadPats<sextloadi8, LDB, LDBD, LDBX, AddrDisp1, LDB_FI>;
+defm : SHLoadPats<extloadi8, LDB, LDBD, LDBX, AddrDisp1, LDB_FI>;
+defm : SHLoadPats<sextloadi16, LDW, LDWD, LDWX, AddrDisp2, LDW_FI>;
+defm : SHLoadPats<extloadi16, LDW, LDWD, LDWX, AddrDisp2, LDW_FI>;
+
+multiclass SHZeroLoadPats<PatFrag op, SHInst plain, SHInst disp,
+                          SHInst index, ComplexPattern dispaddr,
+                          SHPseudo frame, SHInst ext> {
+  def : Pat<(i32 (op (AddrFrame GPR:$base, i32:$off))),
+            (ext (frame GPR:$base, i32:$off))>;
+  def : Pat<(i32 (op (dispaddr GPR:$base, i32:$off))),
+            (ext (disp GPR:$base, i32:$off))>;
+  def : Pat<(i32 (op (AddrIndex R0C:$idx, GPR:$base))),
+            (ext (index R0C:$idx, GPR:$base))>;
+  def : Pat<(i32 (op GPR:$addr)), (ext (plain GPR:$addr))>;
+}
+
+defm : SHZeroLoadPats<zextloadi8, LDB, LDBD, LDBX, AddrDisp1, LDB_FI, EXTUB>;
+defm : SHZeroLoadPats<zextloadi16, LDW, LDWD, LDWX, AddrDisp2, LDW_FI, EXTUW>;
+
+// Stores.
+multiclass SHStorePats<PatFrag op, SHInst plain, SHInst disp, SHInst index,
+                       ComplexPattern dispaddr, SHPseudo frame,
+                       RegisterClass disprc> {
+  def : Pat<(op i32:$src, (AddrFrame GPR:$base, i32:$off)),
+            (frame GPR:$src, GPR:$base, i32:$off)>;
+  def : Pat<(op disprc:$src, (dispaddr GPR:$base, i32:$off)),
+            (disp disprc:$src, GPR:$base, i32:$off)>;
+  def : Pat<(op i32:$src, (AddrIndex R0C:$idx, GPR:$base)),
+            (index GPR:$src, R0C:$idx, GPR:$base)>;
+  def : Pat<(op i32:$src, GPR:$addr), (plain GPR:$src, GPR:$addr)>;
+}
+
+defm : SHStorePats<store, STL, STLD, STLX, AddrDisp4, STL_FI, GPR>;
+defm : SHStorePats<truncstorei8, STB, STBD, STBX, AddrDisp1, STB_FI, R0C>;
+defm : SHStorePats<truncstorei16, STW, STWD, STWX, AddrDisp2, STW_FI, R0C>;
+
+// Logic with an 8-bit immediate works on R0 only. extu.b is better for 255.
+let AddedComplexity = -1 in {
+def : Pat<(and i32:$src, imm_uimm8:$imm),
+          (COPY_TO_REGCLASS (ANDI (COPY_TO_REGCLASS GPR:$src, R0C), imm:$imm),
+                            GPR)>;
+def : Pat<(or i32:$src, imm_uimm8:$imm),
+          (COPY_TO_REGCLASS (ORI (COPY_TO_REGCLASS GPR:$src, R0C), imm:$imm),
+                            GPR)>;
+def : Pat<(xor i32:$src, imm_uimm8:$imm),
+          (COPY_TO_REGCLASS (XORI (COPY_TO_REGCLASS GPR:$src, R0C), imm:$imm),
+                            GPR)>;
+}
+
+// Extensions.
+def : Pat<(i32 (sext_inreg i32:$src, i1)),
+          (NEG (AND (MOVI 1), GPR:$src))>;
+
+// Byte swap.
+def : Pat<(i32 (bswap i32:$src)), (SWAPB (SWAPW (SWAPB GPR:$src)))>;
+def : Pat<(i32 (rotr i32:$src, (i32 16))), (SWAPW GPR:$src)>;
+
+// Shifts. Constants use the fixed shift instructions where that is short;
+// everything else goes through the SH-3 dynamic shifts.
+def shift_cheap_left : ImmLeaf<i32, [{
+  return SuperHInstrInfo::getShiftCost(Imm, SuperHInstrInfo::ShiftLeft) <= 3;
+}]>;
+def shift_cheap_right : ImmLeaf<i32, [{
+  return SuperHInstrInfo::getShiftCost(Imm, SuperHInstrInfo::ShiftRight) <= 3;
+}]>;
+def shift_one : ImmLeaf<i32, [{ return Imm == 1; }]>;
+def NegShift : SDNodeXForm<imm, [{
+  return CurDAG->getSignedTargetConstant(-N->getSExtValue(), SDLoc(N),
+                                         MVT::i32);
+}]>;
+
+def : Pat<(shl i32:$src, (i32 shift_cheap_left:$amount)),
+          (SHLLI GPR:$src, imm:$amount)>;
+def : Pat<(srl i32:$src, (i32 shift_cheap_right:$amount)),
+          (SHLRI GPR:$src, imm:$amount)>;
+def : Pat<(sra i32:$src, (i32 shift_one:$amount)),
+          (SHARI GPR:$src, imm:$amount)>;
+def : Pat<(sra i32:$src, (i32 31)),
+          (SHAD GPR:$src, (MOVI -32))>;
+def : Pat<(shl i32:$src, (i32 imm:$amount)),
+          (SHLD GPR:$src, (MOVI imm:$amount))>;
+def : Pat<(srl i32:$src, (i32 imm:$amount)),
+          (SHLD GPR:$src, (MOVI (NegShift imm:$amount)))>;
+def : Pat<(sra i32:$src, (i32 imm:$amount)),
+          (SHAD GPR:$src, (MOVI (NegShift imm:$amount)))>;
+def : Pat<(shl i32:$src, i32:$amount), (SHLD GPR:$src, GPR:$amount)>;
+def : Pat<(srl i32:$src, i32:$amount), (SHLD GPR:$src, (NEG GPR:$amount))>;
+def : Pat<(sra i32:$src, i32:$amount), (SHAD GPR:$src, (NEG GPR:$amount))>;
+
+// Comparisons with zero.
+def : Pat<(SHcmpeq i32:$a, (i32 0)), (TST GPR:$a, GPR:$a)>;
+
+// Microsoft's C runtime traps with trapa #1.
+def : Pat<(trap), (TRAPA 1)>;
+def : Pat<(debugtrap), (TRAPA 1)>;

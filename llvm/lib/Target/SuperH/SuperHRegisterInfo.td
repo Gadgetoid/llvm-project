@@ -184,10 +184,15 @@ let Namespace = "SH" in {
 // Register Classes
 //===----------------------------------------------------------------------===//
 
-def GPR8  : RegisterClass<"SH", [ i8 ], 32, (sequence "R%u", 0, 15)>;
-def GPR16 : RegisterClass<"SH", [ i16 ], 32, (sequence "R%u", 0, 15)>;
-def GPR32 : RegisterClass<"SH", [ i32 ], 32, (sequence "R%u", 0, 15)>;
-def GPR   : RegisterClass<"SH", [ i8, i16, i32 ], 32, (sequence "R%u", 0, 15)>;
+// General purpose registers. The allocation order prefers the temporaries,
+// then R0 (which several instructions need for themselves), then the
+// permanent registers. R15 is the stack pointer and always reserved.
+def GPR : RegisterClass<"SH", [i32], 32, (add R1, R2, R3, R4, R5, R6, R7, R0,
+                                              R8, R9, R10, R11, R12, R13, R14,
+                                              R15)>;
+
+// R0 alone, for the instructions that only work with R0.
+def R0C : RegisterClass<"SH", [i32], 32, (add R0)>;
 
 // 32-bit floating point registers.
 def FR32 : RegisterClass<"SH", [ f32 ], 32, (add
@@ -223,11 +228,3 @@ def CTRL : RegisterClass<"SH", [ i32 ], 32,
 def SYS : RegisterClass<"SH", [ i32 ], 32, 
   (add PR, PC, MACLO, MACHI, FPSCR, FPUL)>, Unallocatable;
 
-// Program Counter
-def R_PC : RegisterClass<"SH", [ i32 ], 32, (add PC)>, Unallocatable;
-
-// GBR
-def R_GBR : RegisterClass<"SH", [ i32 ], 32, (add GBR)>, Unallocatable;
-
-// R0 Register
-def R_R0 : RegisterClass<"SH", [ i32 ], 32, (add R0)>;

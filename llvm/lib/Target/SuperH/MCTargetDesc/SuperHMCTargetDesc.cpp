@@ -50,12 +50,35 @@ static MCInstrInfo *createSuperHMCInstrInfo() {
 
 static MCRegisterInfo *createSuperHMCRegisterInfo(const Triple &TT) {
   MCRegisterInfo *X = new MCRegisterInfo();
-  InitSuperHMCRegisterInfo(X, SH::R0);
+  InitSuperHMCRegisterInfo(X, SH::PR);
   return X;
+}
+
+static StringRef getDefaultCPU(const Triple &TT) {
+  switch (TT.getSubArch()) {
+  case Triple::SuperHSubArch_1:
+    return "sh1";
+  case Triple::SuperHSubArch_2:
+    return "sh2";
+  case Triple::SuperHSubArch_2a:
+    return "sh2a";
+  case Triple::SuperHSubArch_2e:
+    return "sh2e";
+  case Triple::SuperHSubArch_3:
+    return "sh3";
+  case Triple::SuperHSubArch_3e:
+    return "sh3e";
+  case Triple::SuperHSubArch_4:
+    return "sh4";
+  default:
+    return "sh4a";
+  }
 }
 
 static MCSubtargetInfo *
 createSuperHMCSubtargetInfo(const Triple &TT, StringRef CPU, StringRef FS) {
+  if (CPU.empty() || CPU == "generic")
+    CPU = getDefaultCPU(TT);
   return createSuperHMCSubtargetInfoImpl(TT, CPU, CPU, FS);
 }
 

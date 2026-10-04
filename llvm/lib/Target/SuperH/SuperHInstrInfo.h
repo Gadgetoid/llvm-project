@@ -1,9 +1,8 @@
 //===-- SuperHInstrInfo.h - SuperH Instruction Information ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,7 +14,6 @@
 #define LLVM_LIB_TARGET_SUPERH_SUPERHINSTRINFO_H
 
 #include "SuperHRegisterInfo.h"
-#include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -24,111 +22,64 @@
 #include "SuperHGenInstrInfo.inc"
 
 namespace llvm {
+
 class SuperHSubtarget;
 
-namespace SHCC {
-
-/// SuperH specific condition codes.
-/// These correspond to `SH_*_COND` in `SuperHInstrInfo.td`.
-/// They must be kept in sync.
-enum CondCode {
-  COND_EQ, //!< Equal
-  COND_GT, //!< Greater than
-  COND_GE, //!< Greater than or equal
-  COND_HI, //!< Higher than
-  COND_HS, //!< Higher than or same
-  COND_PL, //!< Greater than 0
-  COND_PZ, //!< Greater than or equal to 0
-  COND_Z,  //!< Zero
-  COND_T,  //!< True
-  COND_F,  //!< False
-  COND_INVALID
+namespace SHII {
+/// Target-specific flags of the SuperH TSFlags field.
+enum {
+  /// The instruction may not be placed in a delay slot.
+  DelayIllegal = 1 << 0,
 };
-
-static StringRef getCondName(CondCode CC) {
-  switch(CC) {
-  default:
-    return "<invalid>";
-  case COND_EQ: return "eq";
-  case COND_GT: return "gt";
-  case COND_GE: return "ge";
-  case COND_HI: return "hi";
-  case COND_HS: return "hs";
-  case COND_PL: return "pl";
-  case COND_PZ: return "pz";
-  case COND_Z:  return "z";
-  case COND_T:  return "t";
-  case COND_F:  return "f";
-  }
-}
-
-} // end of namespace SHCC
+} // namespace SHII
 
 class SuperHInstrInfo : public SuperHGenInstrInfo {
-  using Block = MachineBasicBlock;
-  using BlockIt = Block::iterator;
-  using MIFlag = MachineInstr::MIFlag;
-  const SuperHSubtarget &STI;
   const SuperHRegisterInfo RI;
+
   virtual void anchor();
 
 public:
   explicit SuperHInstrInfo(const SuperHSubtarget &STI);
 
-  /// getRegisterInfo - TargetInstrInfo is a superset of MRegister info.  As
-  /// such, whenever a client has an instance of instruction info, it should
-  /// always be able to get register info as well (through this method).
   const SuperHRegisterInfo &getRegisterInfo() const { return RI; }
 
-  /// Gets whether a given opcode can fill a delay slot.
-  ///
-  /// SuperH does not allow branch instructions of any kind to be situated
-  /// in a delay slot, nor does it allow instructions with delay slots
-  /// to be chained together.
-  bool canFillDelaySlot(unsigned Opcode) const;
-  SHCC::CondCode getCondFromBranchOp(unsigned Op) const;
-  SHCC::CondCode getOppositeCondCode(SHCC::CondCode CC) const;
-  const MCInstrDesc &getBrCond(SHCC::CondCode CC, bool delaySlot) const;
+  enum ShiftKind { ShiftLeft, ShiftRight, ShiftArithmeticRight };
 
-  // Instruction Info
+  /// Number of fixed shift instructions needed to shift by \p Amount, or a
+  /// large number if the shift has no short fixed sequence.
+  static unsigned getShiftCost(int64_t Amount, ShiftKind Kind);
+
+  /// Whether an instruction may be placed in a branch delay slot.
+  bool isDelaySlotCandidate(const MachineInstr &MI) const;
+
   unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
-  unsigned getInstSizeInBytes(const MCInst &MI) const;
 
-  /// Return the noop instruction to use for a noop.
   MCInst getNop() const override;
-  void insertNoop(MachineBasicBlock &MBB,
-                  MachineBasicBlock::iterator MI) const override;
 
-  // Helpers.
-
-  /// emitAddressAdjust - Emits an adjustment to an address stored in a register,
-  /// said adjustment will, if within the MaxAdd range, be emitted as a series of
-  /// immediate add instructions, otherwise the implementation will try to store
-  /// the offset into the constant pool, load it and add it to the register, 
-  /// clobbering R1.
-  void emitAddressAdjust(Register Reg, Block &MBB, BlockIt MBBI, int32_t AdjValue, 
-                         int32_t MaxAdd, MIFlag Flag = MIFlag::NoFlags) const;
-
-  // Stack Frames
   void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
                    const DebugLoc &DL, Register DestReg, Register SrcReg,
                    bool KillSrc, bool RenamableDest = false,
                    bool RenamableSrc = false) const override;
+
   void storeRegToStackSlot(
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register SrcReg,
-      bool isKill, int FrameIndex, const TargetRegisterClass *RC, Register VReg,
+      bool IsKill, int FrameIndex, const TargetRegisterClass *RC,
+      Register VReg,
       MachineInstr::MIFlag Flags = MachineInstr::NoFlags) const override;
+
   void loadRegFromStackSlot(
-      MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register DestReg,
-      int FrameIndex, const TargetRegisterClass *RC, Register VReg,
-      unsigned SubReg = 0,
+      MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+      Register DestReg, int FrameIndex, const TargetRegisterClass *RC,
+      Register VReg, unsigned SubReg = 0,
       MachineInstr::MIFlag Flags = MachineInstr::NoFlags) const override;
+
   Register isLoadFromStackSlot(const MachineInstr &MI,
                                int &FrameIndex) const override;
   Register isStoreToStackSlot(const MachineInstr &MI,
                               int &FrameIndex) const override;
 
-  // Branch Analysis
+  bool expandPostRAPseudo(MachineInstr &MI) const override;
+
   bool analyzeBranch(MachineBasicBlock &MBB, MachineBasicBlock *&TBB,
                      MachineBasicBlock *&FBB,
                      SmallVectorImpl<MachineOperand> &Cond,
@@ -141,12 +92,23 @@ public:
                         int *BytesRemoved = nullptr) const override;
   bool
   reverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const override;
-
   MachineBasicBlock *getBranchDestBlock(const MachineInstr &MI) const override;
 
-  bool isBranchOffsetInRange(unsigned BranchOpc,
-                             int64_t BrOffset) const override;
+  /// Emits Reg += Amount, using \p Scratch for amounts that need a literal.
+  void adjustRegister(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                      const DebugLoc &DL, Register Reg, int64_t Amount,
+                      Register Scratch,
+                      MachineInstr::MIFlag Flag = MachineInstr::NoFlags) const;
+
+  /// Emits Reg = Value.
+  void loadImmediate(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                     const DebugLoc &DL, Register Reg, int64_t Value,
+                     MachineInstr::MIFlag Flag = MachineInstr::NoFlags) const;
+
+private:
+  void expandShift(MachineInstr &MI, ShiftKind Kind) const;
 };
+
 } // namespace llvm
 
-#endif // end LLVM_LIB_TARGET_SUPERH_SUPERHINSTRINFO_H
+#endif // LLVM_LIB_TARGET_SUPERH_SUPERHINSTRINFO_H

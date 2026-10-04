@@ -33,7 +33,6 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeSuperHTarget() {
 
   PassRegistry &Registry = *PassRegistry::getPassRegistry();
   initializeSuperHAsmPrinterPass(Registry);
-  initializeSuperHExpandPseudoPass(Registry);
   initializeSuperHFillDelaySlotsPass(Registry);
   initializeSuperHConstantIslandsPass(Registry);
   initializeSuperHDAGToDAGISelLegacyPass(Registry);
@@ -49,33 +48,23 @@ public:
   SuperHPassConfig(SuperHTargetMachine &TM, PassManagerBase &PM)
       : TargetPassConfig(TM, PM) {}
 
-  bool addInstSelector() override;
-  void addPostRegAlloc() override;
-  void addPreEmitPass2() override;
   SuperHTargetMachine &getSuperHTargetMachine() const {
     return getTM<SuperHTargetMachine>();
   }
+
+  bool addInstSelector() override {
+    addPass(createSuperHISelDag(getSuperHTargetMachine(), getOptLevel()));
+    return false;
+  }
+
+  void addPreEmitPass() override { addPass(createSuperHFillDelaySlotsPass()); }
+
+  // Literal pools and branch relaxation need the final instruction sizes,
+  // so they run last.
+  void addPreEmitPass2() override {
+    addPass(createSuperHConstantIslandPass());
+  }
 };
-
-bool SuperHPassConfig::addInstSelector() {
-  addPass(createSuperHISelDag(getSuperHTargetMachine(), getOptLevel()));
-  return false;
-}
-
-void SuperHPassConfig::addPostRegAlloc() {
-  addPass(createSuperHFrameFixupPass());
-}
-
-void SuperHPassConfig::addPreEmitPass2() {
-  addPass(createSuperHExpandPseudoPass());
-  addPass(createSuperHFillDelaySlotsPass());
-
-  // Inserts Constant Islands. Block sizes cannot be increased after this point,
-  // as this may push the branch ranges and load offsets of accessing constant
-  // pools out of range.
-  addPass(createSuperHConstantIslandPass());
-}
-
 } // namespace
 
 
