@@ -183,8 +183,8 @@ public:
     if (Scratch == SH::R0) {
       TII.loadImmediate(MBB, MI, DL, SH::R0, Offset + Adjust);
       MachineInstrBuilder Builder = build(IndexOpcode)
-                                        .addReg(Value, getKillRegState(Kill))
                                         .addReg(SH::R0, RegState::Kill)
+                                        .addReg(Value, getKillRegState(Kill))
                                         .addReg(Base);
       copyMemOperands(Builder);
     } else {

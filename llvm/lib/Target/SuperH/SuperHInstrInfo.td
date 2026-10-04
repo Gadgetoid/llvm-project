@@ -325,7 +325,8 @@ def LDLG  : FD8<0b11000110, (outs R0C:$dst), (ins disp8x4:$disp),
 }
 }
 
-// Stores.
+// Stores. The R0 operand of the indexed forms comes first so that the fast
+// register allocator gives it R0 before placing the other operands.
 let hasSideEffects = 0, mayStore = 1 in {
 def STB   : FNM<0b0010, 0b0000, (outs), (ins GPR:$Rm, GPR:$Rn),
                 "mov.b\t$Rm, @$Rn">;
@@ -354,15 +355,15 @@ def STWD  : FND4<0b10000001, (outs), (ins R0C:$src, GPR:$Rn, disp4x2:$disp),
 def STLD  : FNMD<0b0001, (outs), (ins GPR:$Rm, GPR:$Rn, disp4x4:$disp),
                  "mov.l\t$Rm, @($disp, $Rn)">;
 
-def STBX  : FNM<0b0000, 0b0100, (outs), (ins GPR:$Rm, R0C:$idx, GPR:$Rn),
+def STBX  : FNM<0b0000, 0b0100, (outs), (ins R0C:$idx, GPR:$Rm, GPR:$Rn),
                 "mov.b\t$Rm, @($idx, $Rn)"> {
   bits<0> idx;
 }
-def STWX  : FNM<0b0000, 0b0101, (outs), (ins GPR:$Rm, R0C:$idx, GPR:$Rn),
+def STWX  : FNM<0b0000, 0b0101, (outs), (ins R0C:$idx, GPR:$Rm, GPR:$Rn),
                 "mov.w\t$Rm, @($idx, $Rn)"> {
   bits<0> idx;
 }
-def STLX  : FNM<0b0000, 0b0110, (outs), (ins GPR:$Rm, R0C:$idx, GPR:$Rn),
+def STLX  : FNM<0b0000, 0b0110, (outs), (ins R0C:$idx, GPR:$Rm, GPR:$Rn),
                 "mov.l\t$Rm, @($idx, $Rn)"> {
   bits<0> idx;
 }
@@ -879,7 +880,7 @@ multiclass SHStorePats<PatFrag op, SHInst plain, SHInst disp, SHInst index,
   def : Pat<(op disprc:$src, (dispaddr GPR:$base, i32:$off)),
             (disp disprc:$src, GPR:$base, i32:$off)>;
   def : Pat<(op i32:$src, (AddrIndex R0C:$idx, GPR:$base)),
-            (index GPR:$src, R0C:$idx, GPR:$base)>;
+            (index R0C:$idx, GPR:$src, GPR:$base)>;
   def : Pat<(op i32:$src, GPR:$addr), (plain GPR:$src, GPR:$addr)>;
 }
 
