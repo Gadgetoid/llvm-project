@@ -3094,6 +3094,15 @@ ARMTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     }
   }
 
+  // Windows CE returns the address of a structure returned in memory in r0.
+  // Copy from RetOps[0], the entry chain, as X86 does for the same rule.
+  if (Register SRetReg = AFI->getSRetReturnReg()) {
+    SDValue Val = DAG.getCopyFromReg(RetOps[0], dl, SRetReg, MVT::i32);
+    Chain = DAG.getCopyToReg(Chain, dl, ARM::R0, Val, Glue);
+    Glue = Chain.getValue(1);
+    RetOps.push_back(DAG.getRegister(ARM::R0, MVT::i32));
+  }
+
   // Update chain and glue.
   RetOps[0] = Chain;
   if (Glue.getNode())
@@ -4458,6 +4467,18 @@ SDValue ARMTargetLowering::LowerFormalArguments(
           }
           lastInsIndex = index;
         }
+    }
+  }
+
+  if (Subtarget->getTargetTriple().isWinCE()) {
+    for (unsigned I = 0, E = Ins.size(); I != E; ++I) {
+      if (!Ins[I].Flags.isSRet())
+        continue;
+      Register Reg = MF.getRegInfo().createVirtualRegister(&ARM::GPRRegClass);
+      AFI->setSRetReturnReg(Reg);
+      SDValue Copy = DAG.getCopyToReg(DAG.getEntryNode(), dl, Reg, InVals[I]);
+      Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Copy, Chain);
+      break;
     }
   }
 

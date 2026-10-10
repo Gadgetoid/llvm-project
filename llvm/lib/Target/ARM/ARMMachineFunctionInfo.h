@@ -51,6 +51,10 @@ class ARMFunctionInfo : public MachineFunctionInfo {
   /// ReturnRegsCount - Number of registers used up in the return.
   unsigned ReturnRegsCount = 0;
 
+  /// SRetReturnReg - Windows CE returns the address of a structure returned
+  /// in memory in r0. This holds that address from the function's entry.
+  Register SRetReturnReg;
+
   /// HasStackFrame - True if this function has a stack frame. Set by
   /// determineCalleeSaves().
   bool HasStackFrame = false;
@@ -181,6 +185,9 @@ public:
 
   unsigned getReturnRegsCount() const { return ReturnRegsCount; }
   void setReturnRegsCount(unsigned s) { ReturnRegsCount = s; }
+
+  Register getSRetReturnReg() const { return SRetReturnReg; }
+  void setSRetReturnReg(Register Reg) { SRetReturnReg = Reg; }
 
   bool hasStackFrame() const { return HasStackFrame; }
   void setHasStackFrame(bool s) { HasStackFrame = s; }
