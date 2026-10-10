@@ -490,7 +490,7 @@ arm::FloatABI arm::getDefaultFloatABI(const llvm::Triple &Triple) {
     return FloatABI::Hard;
 
   default:
-    if (Triple.isOHOSFamily())
+    if (Triple.isOHOSFamily() || Triple.isWinCE())
       return FloatABI::Soft;
     switch (Triple.getEnvironment()) {
     case llvm::Triple::GNUEABIHF:

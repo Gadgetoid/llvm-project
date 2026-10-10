@@ -43,13 +43,14 @@ static std::string computeARMDataLayout(const Triple &TT, StringRef ABIName) {
   // ARM/Thumb state).
   Ret += "-Fi8";
 
-  // ABIs other than APCS have 64 bit integers with natural alignment.
-  if (ABI != ARM::ARM_ABI_APCS)
+  // ABIs other than APCS have 64 bit integers with natural alignment, as does
+  // Windows CE, which passes arguments as APCS does.
+  if (ABI != ARM::ARM_ABI_APCS || TT.isWinCE())
     Ret += "-i64:64";
 
   // We have 64 bits floats. The APCS ABI requires them to be aligned to 32
   // bits, others to 64 bits. We always try to align to 64 bits.
-  if (ABI == ARM::ARM_ABI_APCS)
+  if (ABI == ARM::ARM_ABI_APCS && !TT.isWinCE())
     Ret += "-f64:32:64";
 
   // We have 128 and 64 bit vectors. The APCS ABI aligns them to 32 bits, others

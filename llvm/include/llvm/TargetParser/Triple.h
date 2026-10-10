@@ -937,7 +937,7 @@ public:
   bool isMlibc() const { return getEnvironment() == Triple::Mlibc; }
 
   /// Tests whether the environment is Windows CE on a bare ELF target, as
-  /// used for SuperH code that follows Microsoft's calling standard.
+  /// used for SuperH and ARM code that follows Microsoft's calling standard.
   bool isWinCE() const { return getEnvironment() == Triple::WinCE; }
 
   /// Tests whether the environment is musl-libc

@@ -539,6 +539,9 @@ void ARM::fillValidCPUArchList(SmallVectorImpl<StringRef> &Values) {
 StringRef ARM::computeDefaultTargetABI(const Triple &TT) {
   StringRef ArchName = TT.getArchName();
 
+  if (TT.isWinCE())
+    return "apcs-gnu";
+
   if (TT.isOSBinFormatMachO()) {
     if (TT.getEnvironment() == Triple::EABI ||
         TT.getOS() == Triple::UnknownOS ||

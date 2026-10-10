@@ -468,7 +468,7 @@ ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty, bool isVariadic,
   unsigned SizeRegs;
   // FIXME: Try to match the types of the arguments more accurately where
   // we can.
-  if (TyAlign <= 4) {
+  if (TyAlign <= 4 || getTarget().getTriple().isWinCE()) {
     ElemTy = llvm::Type::getInt32Ty(getVMContext());
     SizeRegs = (getContext().getTypeSize(Ty) + 31) / 32;
   } else {
@@ -616,6 +616,11 @@ ABIArgInfo ARMABIInfo::classifyReturnType(QualType RetTy, bool isVariadic,
     if (RetTy->isAnyComplexType())
       return ABIArgInfo::getDirect(llvm::IntegerType::get(
           getVMContext(), getContext().getTypeSize(RetTy)));
+
+    // Windows CE returns every structure in memory.
+    if (getTarget().getTriple().isWinCE())
+      return getNaturalAlignIndirect(RetTy,
+                                     getDataLayout().getAllocaAddrSpace());
 
     // Integer like structures are returned in r0.
     if (isIntegerLikeType(RetTy, getContext(), getVMContext())) {

@@ -3419,8 +3419,9 @@ void MicrosoftRecordLayoutBuilder::computeVtorDispSet(
 }
 
 bool ASTContext::defaultsToMsStruct() const {
+  const llvm::Triple &T = getTargetInfo().getTriple();
   return getTargetInfo().hasMicrosoftRecordLayout() ||
-         getTargetInfo().getTriple().isWindowsGNUEnvironment();
+         T.isWindowsGNUEnvironment() || (T.isARM() && T.isWinCE());
 }
 
 const ASTRecordLayout &

@@ -47,14 +47,16 @@ void ARMTargetInfo::setABIAAPCS() {
 void ARMTargetInfo::setABIAPCS(bool IsAAPCS16) {
   IsAAPCS = false;
 
-  if (IsAAPCS16)
+  bool IsWinCE = getTriple().isWinCE();
+
+  if (IsAAPCS16 || IsWinCE)
     DoubleAlign = LongLongAlign = LongDoubleAlign = SuitableAlign = 64;
   else
     DoubleAlign = LongLongAlign = LongDoubleAlign = SuitableAlign = 32;
   BFloat16Width = BFloat16Align = 16;
   BFloat16Format = &llvm::APFloat::BFloat();
 
-  WCharType = SignedInt;
+  WCharType = IsWinCE ? UnsignedShort : SignedInt;
 
   // Do not respect the alignment of bit-field types when laying out
   // structures. This corresponds to PCC_BITFIELD_TYPE_MATTERS in gcc.
@@ -275,6 +277,8 @@ ARMTargetInfo::ARMTargetInfo(const llvm::Triple &Triple,
   } else if (Triple.isOSWindows()) {
     // FIXME: this is invalid for WindowsCE
     setABI("aapcs");
+  } else if (Triple.isWinCE()) {
+    setABI("apcs-gnu");
   } else {
     // Select the default based on the platform.
     switch (Triple.getEnvironment()) {
